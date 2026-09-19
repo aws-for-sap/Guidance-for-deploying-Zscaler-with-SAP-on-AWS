@@ -1,0 +1,6 @@
+{
+  "app": "npx tsx bin/app.ts",
+  "context": {
+    "_comment": "Placeholder scaffold. The full ZPA App Connector implementation will be added here."
+  }
+}

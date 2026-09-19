@@ -1,0 +1,12 @@
+# CDK / Node
+node_modules/
+cdk.out/
+*.js
+*.d.ts
+*.tsbuildinfo
+cdk.context.json
+
+# Logs / OS
+*.log
+.DS_Store
+Thumbs.db
