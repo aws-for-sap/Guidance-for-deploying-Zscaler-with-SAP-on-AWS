@@ -1,48 +1,56 @@
 # Guidance for deploying Zscaler with SAP on AWS
 
-This repository provides guidance and an AWS CDK reference implementation for deploying **Zscaler ZPA App Connectors** on AWS to provide zero-trust private access to SAP and other workloads.
+This repository provides guidance and an AWS Cloud Development Kit (AWS CDK) reference implementation for Zscaler Private Access (ZPA) App Connectors on AWS. The App Connectors give SAP users and other users identity-based, private access to SAP systems and other private applications. Users need no VPN, and the applications aren't exposed to the internet.
 
-> **Status: early / placeholder.** The CDK application here is a scaffold. Full guidance and the complete implementation are being developed.
+![ZPA App Connectors in two Availability Zones connect SAP users to an SAP VPC through Zscaler and AWS Transit Gateway](cdk/architecture.png)
 
 ## What this deploys
 
-A highly-available Zscaler ZPA App Connector fleet on AWS:
+The AWS CDK app deploys a highly available App Connector fleet with the following properties:
 
-- **Two Availability Zones**, private subnets
-- **Auto Scaling** — configurable (default min 2 / max 4 / desired 4)
-- **Latest Zscaler Marketplace AMI**, resolved automatically at deploy time
-- **Provisioning key in AWS Secrets Manager** (never stored in code)
-- **One-at-a-time weekly patching** so connectivity is never fully lost
-- **CloudWatch monitoring** with alarms for the failure modes that matter
+- **Two Availability Zones**, with the connectors in private subnets and no public IP addresses.
+- **An Amazon EC2 Auto Scaling group**, with a default minimum of 2, maximum of 4, and desired capacity of 4.
+- **The latest Zscaler Amazon Machine Image (AMI) from AWS Marketplace**, resolved when you deploy and updated weekly.
+- **The provisioning key in AWS Secrets Manager**, never in source code.
+- **Weekly patching, one connector at a time**, so connectivity is never fully lost.
+- **Amazon CloudWatch alarms** for the failure modes specific to the connector.
 
-Administration is via **AWS Systems Manager Session Manager** — the connectors open no inbound ports, in line with Zscaler's outbound-only App Connector model.
+Administration is through AWS Systems Manager Session Manager. The connectors open no inbound ports, in line with Zscaler's outbound-only App Connector model.
 
 ## Prerequisites
 
-You provide these before deploying (they are outside the scope of the CDK app):
+You provide the following resources before you deploy. They're outside the scope of the AWS CDK app.
 
-1. A VPC (/24 or larger) with **two private subnets in two Availability Zones** and a **NAT gateway** for outbound internet access.
-2. Network routes from the connector subnets to your private application VPCs (for example via AWS Transit Gateway or VPC peering).
-3. DNS resolution for your internal application domains from the connector VPC.
-4. An accepted **Zscaler ZPA App Connector** AWS Marketplace subscription.
-5. A **provisioning key** created in the Zscaler ZPA Admin Portal.
+1. An Amazon Virtual Private Cloud (Amazon VPC) of /24 or larger, with **two private subnets in two Availability Zones** and a **NAT gateway** for each subnet.
+2. Routes from the connector subnets to your SAP and other private application VPCs, through AWS Transit Gateway or VPC peering.
+3. DNS resolution of your internal application domains from the connector VPC.
+4. An accepted **Zscaler ZPA App Connector** subscription in AWS Marketplace.
+5. A **provisioning key** from the Zscaler ZPA Admin Portal.
+
+For the full list, including tooling and the Auto Scaling service-linked role, see [`cdk/README.md`](cdk/README.md).
 
 ## Repository layout
 
-```
-cdk/          AWS CDK (TypeScript) reference implementation (placeholder)
+The repository contains the following folders:
+
+```text
+cdk/          AWS CDK (TypeScript) app, Lambda function, precheck scripts, and architecture diagram
 ```
 
 ## Getting started
 
-See `cdk/README.md` for how to configure and deploy the CDK application.
+To configure, check, and deploy the AWS CDK app, follow [`cdk/README.md`](cdk/README.md).
 
 ## Security
 
-- The Zscaler provisioning key is held only in AWS Secrets Manager, never in source.
-- Connectors are outbound-only; security groups open no inbound ports.
-- All example values in this repository are placeholders — replace them with your own.
+The guidance follows these security practices:
+
+- The Zscaler provisioning key is held only in AWS Secrets Manager, never in source code.
+- The connectors make outbound connections only. Their security group has no inbound rules.
+- All example values in this repository are placeholders. Replace them with your own.
 
 ## License
 
-See the `LICENSE` file. This guidance is provided as-is for reference.
+This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
+
+Zscaler, ZPA and Zscaler Private Access are trademarks of Zscaler, Inc.

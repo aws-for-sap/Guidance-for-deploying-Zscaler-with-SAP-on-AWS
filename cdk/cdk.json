@@ -1,6 +1,39 @@
 {
-  "app": "npx tsx bin/app.ts",
+  "app": "npx tsx bin/cdk-zpa-connector.ts",
+  "watch": {
+    "include": ["**"],
+    "exclude": ["README.md", "cdk*.json", "**/*.d.ts", "node_modules", "cdk.out"]
+  },
   "context": {
-    "_comment": "Placeholder scaffold. The full ZPA App Connector implementation will be added here."
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+
+    "zpa": {
+      "_comment": "Per-fleet config. Override with -c zpa:<key>=<value> or edit here. account/region/vpcId/privateSubnetIds are REQUIRED.",
+      "account": "",
+      "region": "",
+      "vpcId": "",
+      "privateSubnetIds": [],
+      "minCapacity": 2,
+      "maxCapacity": 4,
+      "desiredCapacity": 4,
+      "instanceType": "m5a.large",
+      "volumeSizeGiB": 80,
+      "secretName": "zpa-connector",
+  "_comment_dnsServerCidrs": "IPv4 CIDRs for DNS egress (UDP/TCP 53). Empty (default) = the VPC CIDR, which covers the in-VPC Route 53 Resolver. List your DNS server IPs as /32s when the VPC DHCP options use DNS servers outside the VPC.",
+  "dnsServerCidrs": [],
+      "_comment_encryptionKeyType": "Secret + log group (and SNS topic + DLQ) encryption. 'customer-managed' (DEFAULT) = one dedicated KMS CMK with annual rotation, self-owned and auditable (~$1/mo/key); clears the CKV_AWS_149 / SECRETSMANAGER_USING_CMK / CLOUDWATCH_LOG_GROUP_ENCRYPTED review findings with no exception. 'aws-managed' = opt-out to AWS-owned/managed keys (aws/secretsmanager + AWS-owned CloudWatch Logs key + aws/sns + SQS-managed), no extra cost but the CMK findings reappear as accepted exceptions.",
+      "encryptionKeyType": "customer-managed",
+      "patchGroup": "zpa-sequential",
+      "zpaProductCode": "by1wc5269g0048ix2nqvr0362",
+      "enableAmiUpdater": true,
+      "enablePatching": true,
+      "enableAlarms": true,
+      "alarmEmail": "",
+      "patchWindowCron": "cron(0 2 ? * SUN *)",
+      "amiUpdaterCron": "cron(0 0 ? * SUN *)"
+    }
   }
 }
