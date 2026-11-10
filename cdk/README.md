@@ -269,6 +269,7 @@ The stack makes the following design decisions:
    - It builds each new launch template version from the version that the Auto Scaling group runs, then makes it the default version.
    - It starts an instance refresh pinned to the new version, at a minimum healthy percentage of 75 and a maximum of 125.
    - Both the lookup and the function filter on owner `aws-marketplace` and the Zscaler product code. So only Zscaler images published in AWS Marketplace qualify.
+   - Before it changes anything, the function checks the image's integrity. See [AMI provenance and integrity](#ami-provenance-and-integrity).
 
    The synthesized result is cached in `cdk.context.json`. See [Redeploying: refresh the cached AMI](#redeploying-refresh-the-cached-ami).
 
@@ -283,6 +284,16 @@ The stack makes the following design decisions:
 6. **A clean enrollment at boot, and an alarm for the backoff**. The user data clears the stale OAuth enrollment state that the AMI leaves at first boot. Then it restarts the connector once, so the connector reads the provisioning key. Without this step, the connector waits for an interactive sign-in and never enrolls. The user data doesn't retry enrollment. After 5 consecutive failures, a Zscaler App Connector enters a **6-hour backoff**. The enrollment-backoff alarm pages on the first occurrence. To recover, fix the cause, then restart the connector through Session Manager with `systemctl restart zpa-connector`.
 
 7. **IMDSv2 required.** The launch template requires Instance Metadata Service Version 2 (`HttpTokens=required`).
+
+### AMI provenance and integrity
+
+> **Zscaler owns and publishes the App Connector AMI.** Zscaler builds the image and is responsible for its contents. Zscaler distributes it through AWS Marketplace under product code `by1wc5269g0048ix2nqvr0362`, subject to Zscaler's license terms. AWS Marketplace hosts the image, so the AMI owner field shows the AWS Marketplace account (owner alias `aws-marketplace`), not a Zscaler account ID. This app doesn't change the image.
+
+The stack checks the AMI at three points:
+
+- **Selection.** The AWS CDK lookup and the AMI updater accept only images with owner `aws-marketplace`, the Zscaler product code, and state `available`. Only AWS can set the `aws-marketplace` owner alias, so a copied or shared image with the same product code doesn't qualify.
+- **Before a refresh.** The AMI updater checks the chosen image again before it creates a launch template version. It must have the `aws-marketplace` owner alias, the Zscaler Marketplace product code, and an EBS root device, and it must not be past its deprecation time. On any failure, the function raises an error and changes nothing. The failed run lands in the dead-letter queue.
+- **At boot.** Before the user data reads the provisioning key, it reads the instance's product codes from the instance metadata. If the Zscaler product code isn't there, the connector never reads the key. It logs the failure to `/var/log/user-data.log` and the console, then shuts down. Amazon EC2 Auto Scaling replaces it, and the scaling notifications reach the alarm topic.
 
 8. **A gp3 root volume.** Cost-efficient baseline storage with fixed IOPS. The AMI updater grows the volume if a newer AMI's snapshot is larger.
 
@@ -299,6 +310,7 @@ The following table lists the security controls.
 | **Session Manager administration** | Administration through Session Manager, with no SSH, no bastion host, and no key pair. |
 | **Least-privilege IAM** | The instance role grants `secretsmanager:GetSecretValue` on the exact secret ARN, plus the managed policies for Systems Manager, the CloudWatch agent, and patching. The AMI-updater role can change only this stack's launch template and Auto Scaling group. Its `ec2:RunInstances` and `iam:PassRole` permissions are limited to this launch template and to the connector role. |
 | **Secret handling** | The provisioning key is held only in Secrets Manager, read at boot, and never in code or state. The secret is retained when you delete the stack. |
+| **AMI provenance and integrity** | Zscaler owns and publishes the AMI through AWS Marketplace (owner alias `aws-marketplace`, product code `by1wc5269g0048ix2nqvr0362`). The stack checks the image at selection, before each AMI refresh, and at boot before the provisioning key is read. See [AMI provenance and integrity](#ami-provenance-and-integrity). |
 | **Encryption at rest** | With the default `encryptionKeyType=customer-managed`, one AWS KMS customer managed key with rotation encrypts the secret, root volumes, log group, alarm topic, and dead-letter queue. With `aws-managed`, AWS managed and AWS owned keys are used instead. Root volumes are encrypted in both modes. |
 | **cdk-nag** | Every `cdk synth` and `cdk deploy` runs the cdk-nag AWS Solutions rule pack. It writes a report to `cdk.out/AwsSolutions-*-NagReport.csv`. Each accepted finding carries an inline `NagSuppressions` reason next to the resource. Any new finding without a suppression fails the synth. |
 | **Secret rotation** | **Off, by design.** Zscaler issues the provisioning key, and you manage it in the ZPA Admin Portal. AWS can't rotate it. To change it, reissue it in the portal, run `put-secret-value`, and refresh the fleet. |

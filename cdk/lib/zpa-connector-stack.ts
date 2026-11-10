@@ -294,6 +294,13 @@ export class ZpaConnectorStack extends cdk.Stack {
       // Region from IMDSv2 (token-based, matches the launch template's requireImdsv2)
       'TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")',
       'REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
+      // AMI integrity check: the instance must carry the Zscaler AWS Marketplace product code
+      // before it receives the provisioning key. Fail closed: no key read, and the instance shuts
+      // down so Amazon EC2 Auto Scaling replaces it (scaling notifications alert the operator).
+      `EXPECTED_PRODUCT_CODE=${cfg.zpaProductCode}`,
+      'PRODUCT_CODES=""; for i in 1 2 3 4 5; do PRODUCT_CODES=$(curl -s -f -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/product-codes) && break; sleep 2; done',
+      'if ! grep -qxF "$EXPECTED_PRODUCT_CODE" <<< "$PRODUCT_CODES"; then echo "[FATAL] AMI integrity check failed: product code $EXPECTED_PRODUCT_CODE not found on this instance (got: $PRODUCT_CODES). Not reading the provisioning key. Shutting down."; shutdown -h now; exit 1; fi',
+      'echo "[OK] AMI integrity check passed: AWS Marketplace product code $EXPECTED_PRODUCT_CODE"',
       `SECRET_NAME=${cfg.secretName}`,
       'mkdir -p /root/.aws && printf "[default]\\nregion = %s\\n" "$REGION" > /root/.aws/config',
       '# Baseline OS + security patch',
@@ -411,6 +418,10 @@ export class ZpaConnectorStack extends cdk.Stack {
       maxCapacity: cfg.maxCapacity,
       desiredCapacity: cfg.desiredCapacity,
       healthCheck: autoscaling.HealthCheck.ec2({ grace: cdk.Duration.seconds(900) }),
+      // The FleetBelowMin alarm reads GroupInServiceInstances, which Amazon EC2 Auto Scaling
+      // publishes only when group metrics collection is on. Without it the alarm sees no data,
+      // treats missing data as breaching, and sits in ALARM permanently.
+      groupMetrics: [new autoscaling.GroupMetrics(autoscaling.GroupMetric.IN_SERVICE_INSTANCES)],
       updatePolicy: autoscaling.UpdatePolicy.rollingUpdate({
         // one connector at a time; each warms up before the next
         minInstancesInService: cfg.minCapacity - 1 < 1 ? 1 : cfg.minCapacity - 1,

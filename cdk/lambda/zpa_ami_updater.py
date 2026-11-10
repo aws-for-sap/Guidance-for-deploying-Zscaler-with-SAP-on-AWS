@@ -34,6 +34,34 @@ INSTANCE_REFRESH = os.environ.get("INSTANCE_REFRESH", "false").lower() == "true"
 SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN", "")
 
 
+def verify_ami_integrity(image):
+    """Fail closed unless the image is the Zscaler AWS Marketplace AMI.
+
+    Zscaler publishes the AMI through AWS Marketplace, so the image owner is the AWS Marketplace
+    account (owner alias aws-marketplace, which only AWS can set). The image must also carry the
+    Zscaler Marketplace product code, be available and EBS-backed, and not be past its
+    deprecation time. Any failure raises, so no launch template version or refresh is created.
+    """
+    problems = []
+    if image.get("ImageOwnerAlias") != "aws-marketplace":
+        problems.append(f"owner alias is {image.get('ImageOwnerAlias')!r}, expected 'aws-marketplace'")
+    codes = {(pc.get("ProductCodeId"), pc.get("ProductCodeType")) for pc in image.get("ProductCodes", [])}
+    if (ZPA_PRODUCT_CODE, "marketplace") not in codes:
+        problems.append(f"product code {ZPA_PRODUCT_CODE} (marketplace) not on the image")
+    if image.get("State") != "available":
+        problems.append(f"state is {image.get('State')!r}")
+    if image.get("RootDeviceType") != "ebs":
+        problems.append(f"root device type is {image.get('RootDeviceType')!r}")
+    deprecation = image.get("DeprecationTime")
+    if deprecation:
+        when = datetime.strptime(deprecation.replace("Z", ""), "%Y-%m-%dT%H:%M:%S.%f")
+        if when <= datetime.utcnow():
+            problems.append(f"image deprecated since {deprecation}")
+    if problems:
+        raise RuntimeError(f"AMI integrity check failed for {image.get('ImageId')}: " + "; ".join(problems))
+    logger.info(f"AMI integrity check passed for {image['ImageId']} (owner alias aws-marketplace, product code {ZPA_PRODUCT_CODE})")
+
+
 def get_latest_zpa_ami(ec2_client):
     """Query Marketplace for the latest available ZPA connector AMI."""
     # Owners=aws-marketplace matches the CDK LookupMachineImage and ensures only
@@ -54,6 +82,7 @@ def get_latest_zpa_ami(ec2_client):
     # Sort by CreationDate descending, take newest
     images.sort(key=lambda x: x["CreationDate"], reverse=True)
     latest = images[0]
+    verify_ami_integrity(latest)
 
     # Determine the root volume snapshot size from the AMI's block device mappings
     root_volume_size = None
