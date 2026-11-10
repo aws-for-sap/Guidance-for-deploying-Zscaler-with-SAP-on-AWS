@@ -21,11 +21,12 @@ Administration is through AWS Systems Manager Session Manager. The connectors op
 
 You provide the following resources before you deploy. They're outside the scope of the AWS CDK app.
 
-1. An Amazon Virtual Private Cloud (Amazon VPC) of /24 or larger, with **two private subnets in two Availability Zones** and a **NAT gateway** for each subnet.
-2. Routes from the connector subnets to your SAP and other private application VPCs, through AWS Transit Gateway or VPC peering.
-3. DNS resolution of your internal application domains from the connector VPC.
-4. An accepted **Zscaler ZPA App Connector** subscription in AWS Marketplace.
-5. A **provisioning key** from the Zscaler ZPA Admin Portal.
+1. An Amazon Virtual Private Cloud (Amazon VPC) with **two private subnets in two Availability Zones**, each /28 or larger. For the address count, see [Subnet sizing](cdk/README.md#subnet-sizing).
+2. **Outbound internet access** from each private subnet, through a regional NAT gateway, a zonal NAT gateway in each Availability Zone, or a centralized egress VPC through AWS Transit Gateway.
+3. Routes from the connector subnets to your SAP and other private application VPCs, through AWS Transit Gateway or VPC peering.
+4. DNS resolution of your internal application domains from the connector VPC.
+5. An accepted **Zscaler ZPA App Connector** subscription in AWS Marketplace.
+6. A **provisioning key** from the Zscaler ZPA Admin Portal.
 
 For the full list, including tooling and the Auto Scaling service-linked role, see [`cdk/README.md`](cdk/README.md).
 

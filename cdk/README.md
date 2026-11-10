@@ -32,7 +32,7 @@ The editable source is [`architecture.drawio`](architecture.drawio), and [`archi
 The diagram shows the following flows:
 
 - **User access:** Users run the Zscaler Client Connector, which connects them to the Zscaler Zero Trust Exchange. The Zero Trust Exchange sends each session to an App Connector.
-- **Outbound only:** Each App Connector runs in a private subnet. It reaches the Zscaler cloud on TCP 443 and 80 through a NAT gateway and an internet gateway.
+- **Outbound only:** Each App Connector runs in a private subnet. It reaches the Zscaler cloud on TCP 443 and 80 through a NAT gateway, or through a centralized egress VPC.
 - **Application access:** The connector reaches the SAP systems and other private applications through AWS Transit Gateway or Amazon Virtual Private Cloud (Amazon VPC) peering.
 - **Supporting services:**
   - At boot, each connector reads the provisioning key from AWS Secrets Manager.
@@ -75,14 +75,25 @@ Put the following resources in place first. The precheck scripts (`scripts/prech
 
 | Prerequisite | Requirement |
 |---|---|
-| **VPC** | An Amazon VPC of /24 or larger, with DNS support and DNS hostnames turned on. |
-| **Private subnets** | Exactly two, in two different Availability Zones, each /27 or larger. |
-| **Outbound internet** | A NAT gateway for each subnet. Interface endpoints alone aren't enough, because the connector needs general outbound access to the Zscaler cloud. |
+| **VPC** | An Amazon VPC with DNS support and DNS hostnames turned on, large enough for its subnets. For example, a /26 holds two /28 private subnets and two /28 public subnets for zonal NAT gateways. |
+| **Private subnets** | Exactly two, in two different Availability Zones, each /28 or larger. See [Subnet sizing](#subnet-sizing). |
+| **Outbound internet** | Each private subnet needs a default route to the internet. Use a regional NAT gateway, a zonal NAT gateway in each Availability Zone, or a centralized egress VPC through AWS Transit Gateway. A regional NAT gateway or a centralized egress VPC needs no public subnet in the connector VPC. Interface endpoints alone aren't enough, because the connector needs general outbound access to the Zscaler cloud. |
 | **Routing to workloads** | Routes from the connector subnets to the private application VPCs, through Transit Gateway or VPC peering. Accept the attachments, and add the return routes. |
 | **DNS** | The connector VPC must resolve the internal application domains. Use Amazon Route 53 Resolver conditional forwarding or a DNS forwarder. If the VPC uses your own DNS servers, add DNS egress to them after deployment (see Step 4.5). |
 | **AWS Marketplace subscription** | Accept the Zscaler ZPA App Connector subscription, product code `by1wc5269g0048ix2nqvr0362`. You do this once for each account, on the console, because there's no API to accept the terms. Without it, the Auto Scaling group can't launch instances. The subscription is free on [the AWS Marketplace listing](https://aws.amazon.com/marketplace/pp?sku=by1wc5269g0048ix2nqvr0362). |
 | **ZPA Admin Portal** | A provisioning key, with a reuse limit equal to or greater than the Auto Scaling group maximum size. |
 | **Auto Scaling service-linked role** | `AWSServiceRoleForAutoScaling` must exist. The AWS KMS key policy names it, and AWS KMS rejects a policy that names a role that doesn't exist yet. AWS creates the role the first time you use an Auto Scaling group in the account. In a new account, create it once with `aws iam create-service-linked-role --aws-service-name autoscaling.amazonaws.com`. |
+
+### Subnet sizing
+
+Size each private subnet for what it holds. Amazon VPC reserves five addresses in every subnet, so a /28 leaves 11 usable addresses. With the default `maxCapacity` of 4, one /28 subnet holds the following:
+
+- Up to four connectors, when the other Availability Zone is unavailable.
+- One more connector while Amazon EC2 Auto Scaling replaces or rebalances instances.
+- One network interface for the AMI updater Lambda function, which runs in the same subnets.
+- One network interface each for a Route 53 Resolver outbound endpoint and a Transit Gateway attachment, if you place them in these subnets.
+
+Use /27 or larger if you raise `maxCapacity`, or if you add interface VPC endpoints or other workloads to these subnets. Amazon VPC doesn't allow a subnet smaller than /28, so a /29 isn't an option. For details, see [Subnet CIDR blocks](https://docs.aws.amazon.com/vpc/latest/userguide/subnet-sizing.html) in the *Amazon VPC User Guide*.
 
 ## Deployment
 

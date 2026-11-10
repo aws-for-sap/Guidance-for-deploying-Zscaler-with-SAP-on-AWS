@@ -79,6 +79,7 @@ Write-Host ""
 
 # 3. Private subnets
 Write-Host "3. Private subnets"
+$egressTgw = $false
 if (-not $Subnets) {
     if ($Vpc) {
         Info "No -Subnets supplied; private-looking subnets in $Vpc :"
@@ -91,19 +92,26 @@ if (-not $Subnets) {
     $azs = aws @AWS ec2 describe-subnets --subnet-ids $parts --query 'Subnets[].AvailabilityZone' --output text 2>$null
     $uniq = ($azs -split "\s+" | Sort-Object -Unique).Count
     if ($uniq -eq 2) { Ok "Subnets are in 2 distinct AZs ($azs)" } else { Bad "Subnets are not in 2 distinct AZs ($azs)" }
+    # Default route to a NAT gateway (regional or zonal) or to a transit gateway (centralized egress VPC)
     foreach ($s in $parts) {
-        $nat = aws @AWS ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$s" `
-            --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId' --output text 2>$null
-        if ($nat -and $nat -ne "None") { Ok "$s has default route via NAT ($nat)" } else { Bad "$s has no NAT default route (outbound internet required)" }
+        $rt = aws @AWS ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$s" `
+            --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`].[NatGatewayId,TransitGatewayId]' --output text 2>$null
+        $nat = [regex]::Match("$rt", 'nat-[0-9a-f]+').Value
+        $tgw = [regex]::Match("$rt", 'tgw-[0-9a-f]+').Value
+        if ($nat) { Ok "$s has default route via NAT gateway ($nat)" }
+        elseif ($tgw) { Ok "$s has default route via transit gateway ($tgw, centralized egress)"; $egressTgw = $true }
+        else { Bad "$s has no default route to a NAT gateway or transit gateway (outbound internet required)" }
     }
 }
 Write-Host ""
 
-# 4. NAT gateways
+# 4. NAT gateways (not required when the subnets use a centralized egress VPC)
 Write-Host "4. NAT gateways"
 if ($Vpc) {
     $nats = aws @AWS ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$Vpc" --query 'NatGateways[?State==`available`].NatGatewayId' --output text 2>$null
-    if ($nats) { Ok "Available NAT gateway(s): $nats" } else { Bad "No available NAT gateway in $Vpc" }
+    if ($nats) { Ok "Available NAT gateway(s): $nats" }
+    elseif ($egressTgw) { Info "No NAT gateway in $Vpc; the subnets use a centralized egress VPC. Confirm it allows outbound TCP 80 and 443." }
+    else { Bad "No available NAT gateway in $Vpc" }
 } else { Info "Skipped (no -Vpc)." }
 Write-Host ""
 

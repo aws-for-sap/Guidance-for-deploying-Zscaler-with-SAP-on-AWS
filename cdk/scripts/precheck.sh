@@ -96,8 +96,10 @@ else
 fi
 echo
 
-# 3. Subnets: two, different AZs, each with a NAT default route
+# 3. Subnets: two, different AZs, each with a default route to a NAT gateway
+#    (regional or zonal) or to a transit gateway (centralized egress VPC)
 echo "3. Private subnets"
+EGRESS_TGW=0
 if [[ -z "$SUBNETS" ]]; then
   if [[ -n "$VPC" ]]; then
     info "No --subnets supplied; private-looking subnets in $VPC (no public IP on launch):"
@@ -112,9 +114,13 @@ else
   UNIQ=$(echo "$AZS" | tr '\t' '\n' | sort -u | wc -l | tr -d ' ')
   if [[ "$UNIQ" == "2" ]]; then ok "Subnets are in 2 distinct AZs ($AZS)"; else bad "Subnets are not in 2 distinct AZs ($AZS)"; fi
   for S in "$S1" "$S2"; do
-    NAT=$("${AWS[@]}" ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$S" \
-      --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId' --output text 2>/dev/null)
-    if [[ -n "$NAT" && "$NAT" != "None" ]]; then ok "$S has default route via NAT ($NAT)"; else bad "$S has no NAT default route (outbound internet required)"; fi
+    RT=$("${AWS[@]}" ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$S" \
+      --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`].[NatGatewayId,TransitGatewayId]' --output text 2>/dev/null)
+    NAT=$(grep -o 'nat-[0-9a-f]*' <<< "$RT" | head -n1)
+    TGW=$(grep -o 'tgw-[0-9a-f]*' <<< "$RT" | head -n1)
+    if [[ -n "$NAT" ]]; then ok "$S has default route via NAT gateway ($NAT)"
+    elif [[ -n "$TGW" ]]; then ok "$S has default route via transit gateway ($TGW, centralized egress)"; EGRESS_TGW=1
+    else bad "$S has no default route to a NAT gateway or transit gateway (outbound internet required)"; fi
   done
 fi
 echo
@@ -124,7 +130,9 @@ echo "4. NAT gateways"
 if [[ -n "$VPC" ]]; then
   NATS=$("${AWS[@]}" ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$VPC" \
     --query 'NatGateways[?State==`available`].NatGatewayId' --output text 2>/dev/null)
-  if [[ -n "$NATS" ]]; then ok "Available NAT gateway(s): $NATS"; else bad "No available NAT gateway in $VPC"; fi
+  if [[ -n "$NATS" ]]; then ok "Available NAT gateway(s): $NATS"
+  elif [[ "$EGRESS_TGW" == "1" ]]; then info "No NAT gateway in $VPC; the subnets use a centralized egress VPC. Confirm it allows outbound TCP 80 and 443."
+  else bad "No available NAT gateway in $VPC"; fi
 else
   info "Skipped (no --vpc)."
 fi
