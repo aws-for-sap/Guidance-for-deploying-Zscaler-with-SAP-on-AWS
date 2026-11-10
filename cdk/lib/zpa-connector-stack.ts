@@ -235,17 +235,12 @@ export class ZpaConnectorStack extends cdk.Stack {
     // (a) Zscaler cloud egress — managed by the CDK (required, no fixed CIDR list).
     sg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'ZPA cloud (TLS tunnels + enrollment) - Zscaler publishes no fixed CIDR list');
     sg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'ZPA cloud (bootstrap / CRL)');
-    // DNS egress, scoped to the DNS servers the connector uses (never 0.0.0.0/0 by default).
-    // Default: the VPC CIDR. The Amazon-provided VPC resolver (VPC+2) is not filtered by
-    // security groups, so the in-VPC Route 53 Resolver and its outbound-endpoint forwarding
-    // work either way. Set zpa:dnsServerCidrs when DHCP options point at DNS servers outside
-    // the VPC. Rule changes update in place; the group description above must stay unchanged.
-    const dnsCidrs = cfg.dnsServerCidrs.length > 0 ? cfg.dnsServerCidrs : [vpc.vpcCidrBlock];
-    for (const cidr of dnsCidrs) {
-      sg.addEgressRule(ec2.Peer.ipv4(cidr), ec2.Port.udp(53), `DNS to ${cidr}`);
-      sg.addEgressRule(ec2.Peer.ipv4(cidr), ec2.Port.tcp(53), `DNS (TCP fallback) to ${cidr}`);
-    }
-    // (b) Backend application egress is NOT created here — see manual step below.
+    // DNS egress is NOT created here. With AmazonProvidedDNS the connector resolves
+    // through the VPC resolver (VPC+2), which security groups do not filter, so no rule
+    // is needed. If the VPC DHCP options point at your own DNS servers, add UDP and TCP 53
+    // egress to those servers as part of the manual post-deployment step (b), so the
+    // connectors can resolve the DNS names of the target SAP systems.
+    // (b) Backend application egress (and any DNS egress) is NOT created here - see manual step below.
 
     // ------------------------------------------------------------------
     // 6. CloudWatch: log group + agent config in SSM Parameter Store
@@ -712,12 +707,14 @@ export class ZpaConnectorStack extends cdk.Stack {
       value:
         `POST-DEPLOY (manual): add backend app egress to SG ${sg.securityGroupId}. ` +
         `The connector INITIATES sessions to backends, so it needs egress to the app ports/CIDRs it serves ` +
-        `(over and above 443/80 to the Zscaler cloud). Confirm the backend supernet CIDR + required ports with the app owner, then e.g.: ` +
+        `(over and above 443/80 to the Zscaler cloud). If the VPC DHCP options use your own DNS servers instead of AmazonProvidedDNS, ` +
+        `also add UDP and TCP 53 egress to those servers so the connector can resolve the SAP host names. ` +
+        `Confirm the backend supernet CIDR + required ports with the app owner, then for example: ` +
         `aws ec2 authorize-security-group-egress --group-id ${sg.securityGroupId} --region ${cfg.region} ` +
         `--ip-permissions "IpProtocol=-1,IpRanges=[{CidrIp=<BACKEND_SUPERNET_CIDR>,Description=backend apps}]"`,
     });
     new cdk.CfnOutput(this, 'ActionRequired', {
-      value: `1) Populate secret '${cfg.secretName}' with the ZPA provisioning key, then refresh the ASG.  2) Add backend app egress to SG ${sg.securityGroupId} (see ManualBackendEgressStep).`,
+      value: `1) Populate secret '${cfg.secretName}' with the ZPA provisioning key, then refresh the ASG.  2) Add backend app egress, and DNS egress if you use your own DNS servers, to SG ${sg.securityGroupId} (see ManualBackendEgressStep).`,
     });
   }
 }

@@ -79,7 +79,7 @@ Put the following resources in place first. The precheck scripts (`scripts/prech
 | **Private subnets** | Exactly two, in two different Availability Zones, each /27 or larger. |
 | **Outbound internet** | A NAT gateway for each subnet. Interface endpoints alone aren't enough, because the connector needs general outbound access to the Zscaler cloud. |
 | **Routing to workloads** | Routes from the connector subnets to the private application VPCs, through Transit Gateway or VPC peering. Accept the attachments, and add the return routes. |
-| **DNS** | The connector VPC must resolve the internal application domains. Use Amazon Route 53 Resolver conditional forwarding or a DNS forwarder. |
+| **DNS** | The connector VPC must resolve the internal application domains. Use Amazon Route 53 Resolver conditional forwarding or a DNS forwarder. If the VPC uses your own DNS servers, add DNS egress to them after deployment (see Step 4.5). |
 | **AWS Marketplace subscription** | Accept the Zscaler ZPA App Connector subscription, product code `by1wc5269g0048ix2nqvr0362`. You do this once for each account, on the console, because there's no API to accept the terms. Without it, the Auto Scaling group can't launch instances. The subscription is free on [the AWS Marketplace listing](https://aws.amazon.com/marketplace/pp?sku=by1wc5269g0048ix2nqvr0362). |
 | **ZPA Admin Portal** | A provisioning key, with a reuse limit equal to or greater than the Auto Scaling group maximum size. |
 | **Auto Scaling service-linked role** | `AWSServiceRoleForAutoScaling` must exist. The AWS KMS key policy names it, and AWS KMS rejects a policy that names a role that doesn't exist yet. AWS creates the role the first time you use an Auto Scaling group in the account. In a new account, create it once with `aws iam create-service-linked-role --aws-service-name autoscaling.amazonaws.com`. |
@@ -149,9 +149,9 @@ aws --profile <profile> --region <region> autoscaling start-instance-refresh \
   --preferences '{"MinHealthyPercentage":50,"InstanceWarmup":300}'
 ```
 
-### Step 4.5: Add backend application egress (manual, required)
+### Step 4.5: Add backend application and DNS egress (manual)
 
-The stack's security group allows outbound traffic to the **Zscaler cloud** on TCP 443 and 80. It also allows **DNS** on port 53, scoped by `dnsServerCidrs`. It doesn't allow traffic to the **backend applications** that the fleet brokers to. Only you know those ports and CIDRs, and a wrong guess built into the template is worse than an explicit, reviewed rule.
+The stack's security group allows outbound traffic to the **Zscaler cloud** on TCP 443 and 80 only. It doesn't allow traffic to the **backend applications** that the fleet brokers to, or to your **DNS servers**. Only you know those ports and CIDRs, and a wrong guess built into the template is worse than an explicit, reviewed rule. The backend rule is always required. The DNS rule depends on how the VPC resolves names.
 
 The App Connector **opens** the session to the backend. Without this rule, it drops its own outbound packets, and the application is unreachable even though enrollment succeeds. The Zscaler and AWS Deployment Guide requires this rule too (Deploy App Connectors, step 12). It asks for egress *"along with any required ports to access the applications the App Connector supports."*
 
@@ -165,7 +165,21 @@ aws --profile <profile> --region <region> ec2 authorize-security-group-egress \
 
 For a tighter rule, allow only the required ports. Don't send backend egress to `0.0.0.0/0`.
 
-The stack already scopes DNS: to the VPC CIDR by default, or to the CIDRs in `dnsServerCidrs`. Security groups don't filter traffic to the Amazon-provided DNS server. So the default works with the in-VPC Route 53 Resolver. Set `dnsServerCidrs` only when the VPC DHCP options point at DNS servers outside the VPC.
+The connectors must resolve the DNS names of the target SAP systems. Check the DHCP options set of the connector VPC to decide whether you need a DNS rule:
+
+- **AmazonProvidedDNS:** no rule is needed. Security groups don't filter traffic to the Amazon-provided DNS server. The connectors reach the Route 53 Resolver and its forwarding rules without a rule.
+- **Your own DNS servers** (for example, Active Directory domain controllers or on-premises DNS): add UDP and TCP 53 egress to each DNS server. TCP 53 covers large responses.
+
+The following command adds DNS egress to one DNS server. Repeat it for each server:
+
+```bash
+aws --profile <profile> --region <region> ec2 authorize-security-group-egress \
+  --group-id <SecurityGroupId-from-outputs> \
+  --ip-permissions "IpProtocol=udp,FromPort=53,ToPort=53,IpRanges=[{CidrIp=<DNS_SERVER_IP>/32,Description=DNS}]" \
+                   "IpProtocol=tcp,FromPort=53,ToPort=53,IpRanges=[{CidrIp=<DNS_SERVER_IP>/32,Description=DNS}]"
+```
+
+If the backend rule already allows all traffic to a supernet that contains the DNS servers, it covers DNS too. Don't send DNS egress to `0.0.0.0/0`.
 
 ### Step 5: Verify
 
@@ -220,7 +234,6 @@ The following table lists the context keys, their defaults, and what they contro
 | `instanceType` | No | `m5a.large` | Zscaler's production recommendation. For low traffic, `m5a.xlarge` and `t3.xlarge` also work. |
 | `volumeSizeGiB` | No | `80` | Root gp3 volume. The AMI updater grows it if a future AMI needs more space. |
 | `secretName` | No | `zpa-connector` | Provisioning-key secret. The stack creates it with a placeholder, so the name must not exist yet. It's retained when you delete the stack. |
-| `dnsServerCidrs` | No | `[]` (the VPC CIDR) | IPv4 CIDRs for DNS egress on UDP and TCP 53. List your DNS server IP addresses as `/32` entries when the VPC DHCP options use DNS servers outside the VPC. |
 | `encryptionKeyType` | No | `customer-managed` | Encryption for the secret, root volumes, log group, alarm topic, and dead-letter queue. `customer-managed` (default) uses one AWS KMS customer managed key with rotation. `aws-managed` uses AWS managed and AWS owned keys. It needs the `AWSServiceRoleForAutoScaling` role (see Prerequisites). |
 | `patchGroup` | No | `zpa-sequential` | Tag that binds connectors to the one-at-a-time patch path. |
 | `enableAmiUpdater` | No | `true` | Provision the weekly AMI-updater Lambda function and EventBridge rule. |
@@ -235,10 +248,9 @@ The following table lists the context keys, their defaults, and what they contro
 
 The stack makes the following design decisions:
 
-1. **An outbound-only security group, with three egress classes.** App Connectors need no inbound access, so the security group has **no inbound rule**. Egress is split into three classes:
-   - **DNS (managed by the stack):** UDP and TCP **53**, to the VPC CIDR by default or to the CIDRs in `dnsServerCidrs`. It's never `0.0.0.0/0` unless you set it.
+1. **An outbound-only security group, with two egress classes.** App Connectors need no inbound access, so the security group has **no inbound rule**. Egress is split into two classes:
    - **The Zscaler cloud (managed by the stack):** **TCP 80 and 443** to **`0.0.0.0/0`**, by design. Zscaler doesn't publish a stable IP address list for App Connector destinations. The connector reaches the *nearest* Zscaler broker or Service Edge, and those endpoints change over time and by Region. Zscaler's guidance is based on ports and domains, not CIDRs, so a fixed CIDR list would break connectivity. The compensating controls are no inbound access, egress on the required ports only, and TLS on all outbound cloud traffic.
-   - **The backend applications (manual, after deployment):** the ports and CIDRs of the private applications that the fleet brokers to. The stack doesn't create this rule, because only the operator knows the values. The `ManualBackendEgressStep` stack output gives the security group ID and an example command (see Step 4.5). The Zscaler guide requires this egress in addition to the cloud ports. Scope it to the backend supernet, not `0.0.0.0/0`.
+   - **The backend applications and DNS (manual, after deployment):** the ports and CIDRs of the private applications that the fleet brokers to. If the VPC doesn't use AmazonProvidedDNS, this class also includes UDP and TCP 53 to your DNS servers. The stack doesn't create these rules, because only the operator knows the values. The `ManualBackendEgressStep` stack output gives the security group ID and an example command (see Step 4.5). The Zscaler guide requires this egress in addition to the cloud ports. Scope it to the backend supernet and the DNS server addresses, not `0.0.0.0/0`.
 
 2. **Session Manager for administration.** There's no SSH key, no bastion host, and no inbound port 22. Break-glass access is through Session Manager, which AWS CloudTrail audits.
 
@@ -263,7 +275,7 @@ The stack makes the following design decisions:
 
 8. **A gp3 root volume.** Cost-efficient baseline storage with fixed IOPS. The AMI updater grows the volume if a newer AMI's snapshot is larger.
 
-9. **Configuration that fails fast.** The typed configuration loader validates inputs when you synthesize. It checks for two subnets, a minimum capacity of at least 2, valid DNS CIDRs, and an alarm email when alarms are on. So misconfigurations surface before any resource is created.
+9. **Configuration that fails fast.** The typed configuration loader validates inputs when you synthesize. It checks for two subnets, a minimum capacity of at least 2, and an alarm email when alarms are on. So misconfigurations surface before any resource is created.
 
 ## Security
 
@@ -272,7 +284,7 @@ The following table lists the security controls.
 | Control | Description |
 |---|---|
 | **No inbound access** | The connector security group has no inbound rules. App Connectors make outbound connections only. |
-| **Restricted egress** | Egress is limited to TCP 80 and 443 for the Zscaler cloud, and DNS on port 53, scoped to the VPC CIDR or `dnsServerCidrs`. The 80 and 443 destination is `0.0.0.0/0` because Zscaler publishes no fixed IP address list for App Connectors. The control is the port restriction and TLS, not the CIDR. |
+| **Restricted egress** | The stack allows egress on TCP 80 and 443 for the Zscaler cloud only. You add backend and, if required, DNS egress, scoped to known CIDRs. The 80 and 443 destination is `0.0.0.0/0` because Zscaler publishes no fixed IP address list for App Connectors. The control is the port restriction and TLS, not the CIDR. |
 | **Session Manager administration** | Administration through Session Manager, with no SSH, no bastion host, and no key pair. |
 | **Least-privilege IAM** | The instance role grants `secretsmanager:GetSecretValue` on the exact secret ARN, plus the managed policies for Systems Manager, the CloudWatch agent, and patching. The AMI-updater role can change only this stack's launch template and Auto Scaling group. Its `ec2:RunInstances` and `iam:PassRole` permissions are limited to this launch template and to the connector role. |
 | **Secret handling** | The provisioning key is held only in Secrets Manager, read at boot, and never in code or state. The secret is retained when you delete the stack. |

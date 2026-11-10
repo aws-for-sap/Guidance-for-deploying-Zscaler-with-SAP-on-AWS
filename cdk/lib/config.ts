@@ -40,13 +40,6 @@ export interface ZpaConfig {
    *                        as accepted exceptions. Choose this only where a dedicated CMK is not wanted.
    */
   encryptionKeyType: 'aws-managed' | 'customer-managed';
-  /**
-   * IPv4 CIDRs the connector may send DNS (UDP/TCP 53) to. Default: empty, which scopes DNS to the VPC CIDR.
-   * Set this to your DNS server IPs (as /32s) when the VPC DHCP options point at DNS servers outside the VPC.
-   * The Amazon-provided VPC resolver is not filtered by security groups, so the default works with the
-   * in-VPC Route 53 Resolver (including outbound-endpoint forwarding).
-   */
-  dnsServerCidrs: string[];
   /** SSM PatchGroup tag value binding connectors to the sequential patch path. */
   patchGroup: string;
   /** Zscaler ZPA App Connector Marketplace product code. */
@@ -107,7 +100,6 @@ export function loadZpaConfig(app: cdk.App): ZpaConfig {
     encryptionKeyType: (String(pick('encryptionKeyType') ?? 'customer-managed').toLowerCase() === 'aws-managed'
       ? 'aws-managed'
       : 'customer-managed') as 'aws-managed' | 'customer-managed',
-    dnsServerCidrs: asStrArray(pick('dnsServerCidrs')).filter((s) => s.length > 0),
     patchGroup: String(pick('patchGroup') ?? 'zpa-sequential'),
     zpaProductCode: String(pick('zpaProductCode') ?? 'by1wc5269g0048ix2nqvr0362'),
     enableAmiUpdater: asBool(pick('enableAmiUpdater'), true),
@@ -133,10 +125,6 @@ export function loadZpaConfig(app: cdk.App): ZpaConfig {
   }
   if (cfg.enableAlarms && !cfg.alarmEmail) {
     errs.push('zpa:alarmEmail is required when enableAlarms is true (or set enableAlarms=false)');
-  }
-  const cidrRe = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}\/(3[0-2]|[12]?\d)$/;
-  for (const c of cfg.dnsServerCidrs) {
-    if (!cidrRe.test(c)) errs.push(`zpa:dnsServerCidrs entry '${c}' is not an IPv4 CIDR (for a single server use a.b.c.d/32)`);
   }
   const rawKeyType = pick('encryptionKeyType');
   if (rawKeyType !== undefined && rawKeyType !== null && rawKeyType !== '') {

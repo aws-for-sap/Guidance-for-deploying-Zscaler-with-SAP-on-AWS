@@ -195,7 +195,7 @@
             <mxPoint as="offset" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="c55" value="brokered access" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;rounded=1;arcSize=40;fillColor=#FFFFFF;opacity=50;strokeColor=none;textOpacity=100;spacingLeft=1;spacingRight=1;spacingTop=0;spacingBottom=0;fontColor=#232F3E;fontSize=12;fontFamily=Arial;" connectable="0" vertex="1" parent="c42">
+        <mxCell id="c55" value="brokered access (manual egress: SAP ports, DNS)" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;rounded=1;arcSize=40;fillColor=#FFFFFF;opacity=50;strokeColor=none;textOpacity=100;spacingLeft=1;spacingRight=1;spacingTop=0;spacingBottom=0;fontColor=#232F3E;fontSize=12;fontFamily=Arial;" connectable="0" vertex="1" parent="c42">
           <mxGeometry x="0.500" y="-12" relative="1" as="geometry">
             <mxPoint as="offset" />
           </mxGeometry>
@@ -242,12 +242,6 @@
         </mxCell>
         <mxCell id="sap-status" value="DRAFT" style="html=1;fontFamily=Arial;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=nowrap;fontSize=14;fontColor=#000000;align=right;" vertex="1" parent="1">
           <mxGeometry x="984" y="12" width="88" height="28" as="geometry" />
-        </mxCell>
-        <mxCell id="sap-title" value="ZPA App Connector deployment for SAP on AWS" style="html=1;fontFamily=Arial;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=nowrap;fontSize=16;fontStyle=1;fontColor=#232F3E;" vertex="1" parent="1">
-          <mxGeometry x="24" y="12" width="720" height="24" as="geometry" />
-        </mxCell>
-        <mxCell id="sap-subtitle" value="SAP users reach SAP systems through Zscaler; the connectors make outbound connections only" style="html=1;fontFamily=Arial;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=nowrap;fontSize=12;fontColor=#5A6B86;" vertex="1" parent="1">
-          <mxGeometry x="24" y="40" width="720" height="20" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>
