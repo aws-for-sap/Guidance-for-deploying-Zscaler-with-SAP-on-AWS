@@ -3,7 +3,10 @@ node_modules/
 cdk.out/
 *.js
 *.d.ts
+!jest.config.js
 *.tsbuildinfo
+
+# CDK context cache (may contain account-specific lookup values)
 cdk.context.json
 
 # Logs / OS
