@@ -251,7 +251,7 @@ The following table lists the context keys, their defaults, and what they contro
 | `enablePatching` | No | `true` | Provision the weekly sequential Systems Manager Maintenance Window. |
 | `enableAlarms` | No | `true` | Provision the CloudWatch alarms and the Amazon SNS topic. |
 | `alarmEmail` | If alarms | | Email address subscribed to the alarm topic. Required when `enableAlarms=true`. |
-| `patchWindowCron` | No | `cron(0 2 ? * SUN *)` | Patch Maintenance Window schedule, in UTC. |
+| `patchWindowCron` | No | `cron(0 3 ? * SAT *)` | Patch Maintenance Window schedule, in UTC. The default is a placeholder. Set your own window, outside your peak SAP usage and away from `amiUpdaterCron`. |
 | `amiUpdaterCron` | No | `cron(0 0 ? * SUN *)` | AMI check schedule, in UTC. |
 | `zpaProductCode` | No | `by1wc5269g0048ix2nqvr0362` | AWS Marketplace product code of the Zscaler ZPA App Connector. |
 

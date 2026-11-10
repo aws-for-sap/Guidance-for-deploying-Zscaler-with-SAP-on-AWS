@@ -54,7 +54,7 @@ export interface ZpaConfig {
   /** Email subscribed to the alarm SNS topic. Required when enableAlarms is true. */
   alarmEmail: string;
 
-  /** Cron for the patch Maintenance Window. Default Sunday 02:00 UTC. */
+  /** Cron for the patch Maintenance Window, in UTC. Default Saturday 03:00 UTC, a placeholder: set your own window. */
   patchWindowCron: string;
   /** Cron for the AMI-updater check. Default Sunday 00:00 UTC. */
   amiUpdaterCron: string;
@@ -106,7 +106,7 @@ export function loadZpaConfig(app: cdk.App): ZpaConfig {
     enablePatching: asBool(pick('enablePatching'), true),
     enableAlarms: asBool(pick('enableAlarms'), true),
     alarmEmail: String(pick('alarmEmail') ?? ''),
-    patchWindowCron: String(pick('patchWindowCron') ?? 'cron(0 2 ? * SUN *)'),
+    patchWindowCron: String(pick('patchWindowCron') ?? 'cron(0 3 ? * SAT *)'),
     amiUpdaterCron: String(pick('amiUpdaterCron') ?? 'cron(0 0 ? * SUN *)'),
   };
 

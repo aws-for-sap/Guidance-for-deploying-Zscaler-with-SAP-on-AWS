@@ -30,7 +30,8 @@
       "enablePatching": true,
       "enableAlarms": true,
       "alarmEmail": "",
-      "patchWindowCron": "cron(0 2 ? * SUN *)",
+      "_comment_patchWindowCron": "Weekly patch Maintenance Window, in UTC. The default (Saturday 03:00 UTC) is a placeholder: set your own window, outside your peak SAP usage and away from amiUpdaterCron.",
+      "patchWindowCron": "cron(0 3 ? * SAT *)",
       "amiUpdaterCron": "cron(0 0 ? * SUN *)"
     }
   }
