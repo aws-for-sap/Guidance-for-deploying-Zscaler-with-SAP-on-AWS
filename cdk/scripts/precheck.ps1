@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    ZPA Connector CDK — pre-deployment prerequisite check (Windows / PowerShell).
+    ZPA Connector CDK - pre-deployment prerequisite check (Windows / PowerShell).
     Validates the prerequisites the CDK app does NOT create, and SUGGESTS a VPC
     and key pair to use. Read-only: it changes nothing.
 
@@ -11,6 +11,7 @@
 .NOTES
     Exit code 0 = all required checks passed; non-zero = at least one failed.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive precheck: colored PASS/FAIL console output is the purpose of this script. The result is also returned as the exit code.')]
 param(
     [Parameter(Mandatory=$true)][string]$Profile,
     [Parameter(Mandatory=$true)][string]$Region,
@@ -129,7 +130,8 @@ if ($LASTEXITCODE -eq 0 -and $arn) {
     Info "The CDK stack manages this secret; ensure its value is the real provisioning key (not the placeholder)."
 } else {
     Info "Secret does not exist yet - the CDK stack will CREATE it empty; populate it after deploy:"
-    Info "  aws --profile $Profile --region $Region secretsmanager put-secret-value --secret-id $Secret --secret-string '<PROVISIONING_KEY>'"
+    Info "  Save the key to provisioning-key.txt with an editor (not on the command line), then:"
+    Info "  aws --profile $Profile --region $Region secretsmanager put-secret-value --secret-id $Secret --secret-string file://provisioning-key.txt; Remove-Item provisioning-key.txt"
 }
 Write-Host ""
 

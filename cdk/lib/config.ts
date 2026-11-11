@@ -47,6 +47,12 @@ export interface ZpaConfig {
 
   /** Provision the weekly AMI-updater Lambda + EventBridge rule. Default true. */
   enableAmiUpdater: boolean;
+  /**
+   * Let the AMI updater start the rolling instance refresh itself. Default true. Set false for
+   * notify-only: the updater creates the new launch template version and notifies, and an operator
+   * starts the refresh after review.
+   */
+  amiUpdaterInstanceRefresh: boolean;
   /** Provision a standalone weekly sequential SSM Maintenance Window. Default true. */
   enablePatching: boolean;
   /** Provision CloudWatch alarms + SNS. Default true. */
@@ -103,6 +109,7 @@ export function loadZpaConfig(app: cdk.App): ZpaConfig {
     patchGroup: String(pick('patchGroup') ?? 'zpa-sequential'),
     zpaProductCode: String(pick('zpaProductCode') ?? 'by1wc5269g0048ix2nqvr0362'),
     enableAmiUpdater: asBool(pick('enableAmiUpdater'), true),
+    amiUpdaterInstanceRefresh: asBool(pick('amiUpdaterInstanceRefresh'), true),
     enablePatching: asBool(pick('enablePatching'), true),
     enableAlarms: asBool(pick('enableAlarms'), true),
     alarmEmail: String(pick('alarmEmail') ?? ''),

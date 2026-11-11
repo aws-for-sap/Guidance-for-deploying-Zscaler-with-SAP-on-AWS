@@ -3,7 +3,7 @@
 
 # Zscaler ZPA App Connector on AWS
 
-> **Important:** This guidance is a reference implementation. Before you deploy to production, review the AWS Identity and Access Management (IAM) policies, encryption settings, network controls, instance sizing, and patch schedules. Adapt them to your organization's security, compliance, and operational requirements.
+> **Important:** This sample code is a non-production reference architecture. It's provided for demonstration and evaluation, and it isn't intended for production use as is. Before you use it with production workloads, review the AWS Identity and Access Management (IAM) policies, encryption settings, network controls, instance sizing, and patch schedules. Adapt them to your organization's security, compliance, and operational requirements, and have your own security team review the result.
 
 ## Overview
 
@@ -145,15 +145,22 @@ npx cdk diff
 npx cdk deploy
 ```
 
-Amazon SNS sends a subscription confirmation to `alarmEmail`. Confirm it, or the alarms deliver no email.
+Amazon SNS sends a subscription confirmation to `alarmEmail`. Confirm it, or the alarms deliver no email. A subscription confirmed from the email link can be unsubscribed by anyone who has a copy of an alarm email. To require AWS sign-in to unsubscribe, confirm it with the AWS CLI instead. Copy the `Token` value from the confirmation link, then run the following command:
+
+```bash
+aws --profile <profile> --region <region> sns confirm-subscription \
+  --topic-arn <alarm-topic-arn> --token <Token-from-the-confirmation-link> \
+  --authenticate-on-unsubscribe true
+```
 
 ### Step 4: Populate the provisioning key
 
-The stack creates the Secrets Manager secret with the placeholder value `REPLACE_WITH_ZPA_PROVISIONING_KEY`. Until you replace it, the connectors fail enrollment with HTTP 401. The following commands put the real key and refresh the fleet:
+The stack creates the Secrets Manager secret with the placeholder value `REPLACE_WITH_ZPA_PROVISIONING_KEY`. Until you replace it, the connectors fail enrollment with HTTP 401. Don't put the key on the command line, where it's saved in your shell history and visible in the process list. Either paste it into the secret in the Secrets Manager console, or save it to a file with a text editor and pass the file. The following commands put the key from a file, delete the file, and refresh the fleet:
 
 ```bash
 aws --profile <profile> --region <region> secretsmanager put-secret-value \
-  --secret-id zpa-connector --secret-string '<ZPA_PROVISIONING_KEY>'
+  --secret-id zpa-connector --secret-string file://provisioning-key.txt
+shred -u provisioning-key.txt    # on Windows: Remove-Item provisioning-key.txt
 
 aws --profile <profile> --region <region> autoscaling start-instance-refresh \
   --auto-scaling-group-name <AsgName-from-outputs> \
@@ -166,15 +173,19 @@ The stack's security group allows outbound traffic to the **Zscaler cloud** on T
 
 The App Connector **opens** the session to the backend. Without this rule, it drops its own outbound packets, and the application is unreachable even though enrollment succeeds. The Zscaler and AWS Deployment Guide requires this rule too (Deploy App Connectors, step 12). It asks for egress *"along with any required ports to access the applications the App Connector supports."*
 
-Confirm the backend supernet CIDRs and ports with the application owner. Examples are RDP 3389, SSH 22, HTTPS 443, and database ports. Then add the rule to the security group in the `SecurityGroupId` stack output. The following command allows all traffic to the backend supernet:
+Allow only the ports that your ZPA application segments define, and only to the CIDRs of the systems behind them. Confirm both with the application owner, and keep the rules in step with the application segments. The following command adds the usual SAP ports for one SAP VPC, to the security group in the `SecurityGroupId` stack output. Replace or extend the ports to match your segments, for example RDP 3389 or a database port:
 
 ```bash
 aws --profile <profile> --region <region> ec2 authorize-security-group-egress \
   --group-id <SecurityGroupId-from-outputs> \
-  --ip-permissions "IpProtocol=-1,IpRanges=[{CidrIp=<BACKEND_SUPERNET_CIDR>,Description=backend apps}]"
+  --ip-permissions \
+    "IpProtocol=tcp,FromPort=3200,ToPort=3299,IpRanges=[{CidrIp=<SAP_VPC_CIDR>,Description=SAP dispatcher}]" \
+    "IpProtocol=tcp,FromPort=3300,ToPort=3399,IpRanges=[{CidrIp=<SAP_VPC_CIDR>,Description=SAP gateway}]" \
+    "IpProtocol=tcp,FromPort=3600,ToPort=3699,IpRanges=[{CidrIp=<SAP_VPC_CIDR>,Description=SAP message server}]" \
+    "IpProtocol=tcp,FromPort=44300,ToPort=44300,IpRanges=[{CidrIp=<SAP_VPC_CIDR>,Description=SAP HTTPS}]"
 ```
 
-For a tighter rule, allow only the required ports. Don't send backend egress to `0.0.0.0/0`.
+Don't add an all-protocol rule to a whole supernet, and don't send backend egress to `0.0.0.0/0`. Either one lets a compromised connector reach far more than the applications it serves.
 
 The connectors must resolve the DNS names of the target SAP systems. Check the DHCP options set of the connector VPC to decide whether you need a DNS rule:
 
@@ -190,7 +201,7 @@ aws --profile <profile> --region <region> ec2 authorize-security-group-egress \
                    "IpProtocol=tcp,FromPort=53,ToPort=53,IpRanges=[{CidrIp=<DNS_SERVER_IP>/32,Description=DNS}]"
 ```
 
-If the backend rule already allows all traffic to a supernet that contains the DNS servers, it covers DNS too. Don't send DNS egress to `0.0.0.0/0`.
+Don't send DNS egress to `0.0.0.0/0`.
 
 ### Step 5: Verify
 
@@ -248,6 +259,7 @@ The following table lists the context keys, their defaults, and what they contro
 | `encryptionKeyType` | No | `customer-managed` | Encryption for the secret, root volumes, log group, alarm topic, and dead-letter queue. `customer-managed` (default) uses one AWS KMS customer managed key with rotation. `aws-managed` uses AWS managed and AWS owned keys. It needs the `AWSServiceRoleForAutoScaling` role (see Prerequisites). |
 | `patchGroup` | No | `zpa-sequential` | Tag that binds connectors to the one-at-a-time patch path. |
 | `enableAmiUpdater` | No | `true` | Provision the weekly AMI-updater Lambda function and EventBridge rule. |
+| `amiUpdaterInstanceRefresh` | No | `true` | Let the AMI updater start the rolling instance refresh, with automatic rollback. Set `false` for notify-only: the updater creates the new launch template version and notifies you, and you start the refresh after review. |
 | `enablePatching` | No | `true` | Provision the weekly sequential Systems Manager Maintenance Window. |
 | `enableAlarms` | No | `true` | Provision the CloudWatch alarms and the Amazon SNS topic. |
 | `alarmEmail` | If alarms | | Email address subscribed to the alarm topic. Required when `enableAlarms=true`. |
@@ -268,6 +280,8 @@ The stack makes the following design decisions:
 3. **The latest AWS Marketplace AMI, at deployment and at run time.** The stack resolves the newest AMI by product code when you synthesize. The AMI-updater Lambda function keeps the running fleet current each week:
    - It builds each new launch template version from the version that the Auto Scaling group runs, then makes it the default version.
    - It starts an instance refresh pinned to the new version, at a minimum healthy percentage of 75 and a maximum of 125.
+   - The refresh rolls back automatically if it fails, or if the enrollment-backoff or OAuth 401 alarm goes to `ALARM` while it runs. A connector that boots but can't enroll still passes EC2 health checks, so these alarms are what catch a bad AMI.
+   - With `amiUpdaterInstanceRefresh=false`, the function stops after the new launch template version and the notification, so you approve each rollout yourself.
    - Both the lookup and the function filter on owner `aws-marketplace` and the Zscaler product code. So only Zscaler images published in AWS Marketplace qualify.
    - Before it changes anything, the function checks the image's integrity. See [AMI provenance and integrity](#ami-provenance-and-integrity).
 
@@ -281,7 +295,7 @@ The stack makes the following design decisions:
 
 5. **Patching one connector at a time.** A dedicated Systems Manager Maintenance Window runs `AWS-RunPatchBaseline` with `MaxConcurrency=1` and `MaxErrors=0`, against the `PatchGroup` tag. Each connector is patched and rebooted, and must return before the next one starts. In a fleet of 2, at most one Availability Zone loses its connector, and only briefly.
 
-6. **A clean enrollment at boot, and an alarm for the backoff**. The user data clears the stale OAuth enrollment state that the AMI leaves at first boot. Then it restarts the connector once, so the connector reads the provisioning key. Without this step, the connector waits for an interactive sign-in and never enrolls. The user data doesn't retry enrollment. After 5 consecutive failures, a Zscaler App Connector enters a **6-hour backoff**. The enrollment-backoff alarm pages on the first occurrence. To recover, fix the cause, then restart the connector through Session Manager with `systemctl restart zpa-connector`.
+6. **A clean enrollment at boot, and an alarm for the backoff**. The AMI starts the connector at first boot, before the key exists, and the connector begins an interactive OAuth enrollment. So the first thing the user data does is stop the connector, mask it for that boot, and clear that enrollment state. No patch or package script can start it again until the key is in place. After the key is written, the user data clears the state once more and starts the connector, so the connector reads the provisioning key. Without this step, the connector waits for an interactive sign-in and never enrolls. The user data doesn't retry enrollment. After 5 consecutive failures, a Zscaler App Connector enters a **6-hour backoff**. The enrollment-backoff alarm pages on the first occurrence. To recover, fix the cause, then restart the connector through Session Manager with `systemctl restart zpa-connector`.
 
 7. **IMDSv2 required.** The launch template requires Instance Metadata Service Version 2 (`HttpTokens=required`).
 
@@ -295,9 +309,11 @@ The stack checks the AMI at three points:
 - **Before a refresh.** The AMI updater checks the chosen image again before it creates a launch template version. It must have the `aws-marketplace` owner alias, the Zscaler Marketplace product code, and an EBS root device, and it must not be past its deprecation time. On any failure, the function raises an error and changes nothing. The failed run lands in the dead-letter queue.
 - **At boot.** Before the user data reads the provisioning key, it reads the instance's product codes from the instance metadata. If the Zscaler product code isn't there, the connector never reads the key. It logs the failure to `/var/log/user-data.log` and the console, then shuts down. Amazon EC2 Auto Scaling replaces it, and the scaling notifications reach the alarm topic.
 
-8. **A gp3 root volume.** Cost-efficient baseline storage with fixed IOPS. The AMI updater grows the volume if a newer AMI's snapshot is larger.
+8. **Signed agent packages.** The user data installs the AWS Systems Manager agent and the CloudWatch agent from AWS S3 buckets, not from a package repository. It verifies each package against the AWS public key before installing it. The check uses a temporary keyring and package database. It also matches the key fingerprint to the value in the AWS documentation. The SSM Agent key is in `assets/amazon-ssm-agent.gpg` and expires on 2027-11-25; replace it when AWS publishes the next one. If the SSM Agent package doesn't verify, the connector keeps the agent that's in the AMI. If the CloudWatch agent package doesn't verify, the connector doesn't install it. Both cases log a `[WARN]` line to `/var/log/user-data.log`.
 
-9. **Configuration that fails fast.** The typed configuration loader validates inputs when you synthesize. It checks for two subnets, a minimum capacity of at least 2, and an alarm email when alarms are on. So misconfigurations surface before any resource is created.
+9. **A gp3 root volume.** Cost-efficient baseline storage with fixed IOPS. The AMI updater grows the volume if a newer AMI's snapshot is larger.
+
+10. **Configuration that fails fast.** The typed configuration loader validates inputs when you synthesize. It checks for two subnets, a minimum capacity of at least 2, and an alarm email when alarms are on. So misconfigurations surface before any resource is created.
 
 ## Security
 
@@ -308,15 +324,56 @@ The following table lists the security controls.
 | **No inbound access** | The connector security group has no inbound rules. App Connectors make outbound connections only. |
 | **Restricted egress** | The stack allows egress on TCP 80 and 443 for the Zscaler cloud only. You add backend and, if required, DNS egress, scoped to known CIDRs. The 80 and 443 destination is `0.0.0.0/0` because Zscaler publishes no fixed IP address list for App Connectors. The control is the port restriction and TLS, not the CIDR. |
 | **Session Manager administration** | Administration through Session Manager, with no SSH, no bastion host, and no key pair. |
-| **Least-privilege IAM** | The instance role grants `secretsmanager:GetSecretValue` on the exact secret ARN, plus the managed policies for Systems Manager, the CloudWatch agent, and patching. The AMI-updater role can change only this stack's launch template and Auto Scaling group. Its `ec2:RunInstances` and `iam:PassRole` permissions are limited to this launch template and to the connector role. |
+| **Scoped IAM** | The stack's own permissions are scoped to its resources. The instance role reads only the exact secret ARN, decrypts only with the stack key, and reads only the `/zpa/cloudwatch-agent/config` parameter. It also has three AWS managed policies: `AmazonSSMManagedInstanceCore`, `CloudWatchAgentServerPolicy` and `AmazonSSMPatchAssociation`. These are broader than this app needs, for example `ssm:GetParameter` and CloudWatch Logs writes on all resources. AWS maintains them as the services change, which is why the stack uses them. To narrow the role further, replace them with your own policies and add a permissions boundary. The AMI-updater role can change only this stack's launch template and Auto Scaling group. Its `ec2:RunInstances` permission works only through this launch template. The image and security groups must come from the launch template itself (`ec2:IsLaunchTemplateResource`), and the image must be an AWS Marketplace image (`ec2:Owner`). Its `iam:PassRole` is limited to the connector role and to Amazon EC2. |
 | **Secret handling** | The provisioning key is held only in Secrets Manager, read at boot, and never in code or state. The secret is retained when you delete the stack. |
 | **AMI provenance and integrity** | Zscaler owns and publishes the AMI through AWS Marketplace (owner alias `aws-marketplace`, product code `by1wc5269g0048ix2nqvr0362`). The stack checks the image at selection, before each AMI refresh, and at boot before the provisioning key is read. See [AMI provenance and integrity](#ami-provenance-and-integrity). |
 | **Encryption at rest** | With the default `encryptionKeyType=customer-managed`, one AWS KMS customer managed key with rotation encrypts the secret, root volumes, log group, alarm topic, and dead-letter queue. With `aws-managed`, AWS managed and AWS owned keys are used instead. Root volumes are encrypted in both modes. |
 | **cdk-nag** | Every `cdk synth` and `cdk deploy` runs the cdk-nag AWS Solutions rule pack. It writes a report to `cdk.out/AwsSolutions-*-NagReport.csv`. Each accepted finding carries an inline `NagSuppressions` reason next to the resource. Any new finding without a suppression fails the synth. |
 | **Secret rotation** | **Off, by design.** Zscaler issues the provisioning key, and you manage it in the ZPA Admin Portal. AWS can't rotate it. To change it, reissue it in the portal, run `put-secret-value`, and refresh the fleet. |
 | **IMDSv2 required** | The launch template requires IMDSv2 tokens. |
+| **No public IP addresses** | The launch template sets `AssociatePublicIpAddress=false`, so connectors never get a public IP address, even in a subnet that assigns one automatically. |
+| **Signed agent packages** | The SSM Agent and CloudWatch agent packages are verified against pinned AWS public key fingerprints before they're installed. See design decision 8. |
+| **AMI-updater egress** | The AMI-updater Lambda function's security group allows only outbound TCP 443, to the AWS service APIs. |
+| **KMS key policy conditions** | The key policy statements for CloudWatch alarms require `aws:SourceAccount` and an `aws:SourceArn` of an alarm in this account and Region. |
+| **Administration and ZPA tenant** | See [Secure administration and operations](#secure-administration-and-operations) for Session Manager logging, who can start sessions, and the ZPA-side controls. |
 | **Encryption in transit** | All connector traffic to the Zscaler cloud uses TLS. |
 | **Continuous patching** | Weekly operating system patching and weekly AMI updates, both applied one connector at a time. |
+
+## Secure administration and operations
+
+The stack secures the AWS side. The following controls cover who can administer the connectors and the Zscaler side of the deployment. You set them up outside this app.
+
+### Audit and limit Session Manager access
+
+Anyone who can start a Session Manager session on a connector can read the provisioning key on its disk. So log every session, and allow sessions only for the people who administer the connectors:
+
+- **Log sessions.** In the Systems Manager console, choose **Session Manager**, **Preferences**. Send session logs to an encrypted CloudWatch Logs log group or Amazon S3 bucket, and turn on KMS encryption for session data. For details, see [Logging session activity](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-logging.html) in the *AWS Systems Manager User Guide*.
+- **Limit who can start a session.** Grant `ssm:StartSession` only to a named administrator role, and only on the connectors. The connectors carry the tag `Application=zpa-connector`, so the following policy statement allows sessions on them alone:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "ssm:StartSession",
+  "Resource": "arn:aws:ec2:<region>:<account-id>:instance/*",
+  "Condition": { "StringEquals": { "ssm:resourceTag/Application": "zpa-connector" } }
+}
+```
+
+Also allow `ssm:TerminateSession` and `ssm:ResumeSession` on the administrator's own sessions. Don't grant `ssm:StartSession` on all instances to other roles in the account.
+
+- **Alert on changes to the agent configuration.** The CloudWatch agent reads its configuration from the `/zpa/cloudwatch-agent/config` parameter at boot. Anyone who can write that parameter can add the provisioning key file to the shipped logs. Writing it already needs administrator-level access in the account. To get an alert when it changes, create an Amazon EventBridge rule on AWS CloudTrail `PutParameter`, `DeleteParameter` and `LabelParameterVersion` events. Match names that start with `/zpa/`, and send the events to the alarm topic. You can also deny those actions on `/zpa/*` to everyone except a deployment role, with a service control policy.
+
+### Protect the ZPA tenant
+
+A connector is only as trustworthy as the ZPA tenant that controls it. Follow the Zscaler guidance for the following controls:
+
+- **A dedicated App Connector group** for this fleet, in each environment, so that application segments and policies for SAP use only these connectors.
+- **Single sign-on and multi-factor authentication** for ZPA Admin Portal administrators, with administrator roles scoped to the minimum.
+- **Monitoring for new enrollments.** Stream the ZPA audit logs and App Connector status to your security monitoring with Zscaler Log Streaming Service. Alert on connectors that enroll outside a deployment or a refresh.
+- **A scoped provisioning key.** Set the reuse limit to the number of connectors you expect to enroll, and keep the key in Secrets Manager only.
+- **Key revocation at clean-up.** When you delete the stack, delete the provisioning key in the ZPA Admin Portal. Also remove the connectors and the App Connector group. See [Clean up](#clean-up).
+
+The user data writes the key file `/opt/zscaler/var/provision_key` with mode `644`. That's the mode the Zscaler AMI uses for it, so the connector service can read it. The file is on an encrypted root volume that only the instance mounts. Change the mode only if Zscaler confirms a tighter one for the connector service user.
 
 ## Monitoring and alerting
 
@@ -327,6 +384,8 @@ The CloudWatch agent ships `/var/log/messages`, which holds the connector journa
 | **Enrollment backoff** | The log shows `re-enrollment in 6 hours` once or more in any of the last three 5-minute periods | **Page.** A connector is stuck for up to 6 hours. |
 | **Fleet under minimum** | `GroupInServiceInstances` under `minCapacity` for 5 consecutive minutes | **Page.** |
 | **Repeated OAuth 401** | 3 or more OAuth 401 responses in one 10-minute period | **Notify.** Suspect the provisioning key. |
+| **AMI updater errors** | The AMI-updater Lambda function returns an error in a 5-minute period | **Notify.** An integrity check or an AWS call failed. Check the function's log. |
+| **AMI updater dead-letter queue** | One or more messages in the dead-letter queue | **Notify.** A run failed after its retries. |
 
 Alarms publish to an Amazon SNS topic subscribed to `alarmEmail`. The ZPA Admin Portal remains the source of truth for connector health on the Zscaler side. These alarms catch the AWS side failures quickly.
 
@@ -354,6 +413,8 @@ The following command deletes the stack:
 ```bash
 npx cdk destroy
 ```
+
+In the ZPA Admin Portal, delete the provisioning key, so that it can't enroll another connector. Then remove the connectors and the App Connector group.
 
 The stack retains three resources on purpose: the provisioning-key secret, the AWS KMS customer managed key, and the `/zpa/connector` log group. Delete them separately when you no longer need them. The key has a waiting period before it's deleted. A redeploy fails while a retained secret or log group with the same name exists. Before you redeploy, delete the log group, and delete the secret or choose a different `secretName`.
 

@@ -27,6 +27,8 @@
       "patchGroup": "zpa-sequential",
       "zpaProductCode": "by1wc5269g0048ix2nqvr0362",
       "enableAmiUpdater": true,
+      "_comment_amiUpdaterInstanceRefresh": "true (default) = the AMI updater starts a rolling instance refresh with automatic rollback. false = notify-only: it creates the new launch template version and notifies, and an operator starts the refresh after review.",
+      "amiUpdaterInstanceRefresh": true,
       "enablePatching": true,
       "enableAlarms": true,
       "alarmEmail": "",

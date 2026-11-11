@@ -57,6 +57,12 @@ export class ZpaConnectorStack extends cdk.Stack {
     // that encrypts BOTH the provisioning-key secret AND the /zpa/connector log group,
     // for stronger, self-owned, auditable control. This single toggle satisfies the
     // Holmes/cfn-guard SECRETSMANAGER and CLOUDWATCH_LOG_GROUP_ENCRYPTED checks when set.
+    // KMS key-policy condition for the cloudwatch.amazonaws.com statements: only alarms in this
+    // account and Region can use the key (aws:SourceAccount + aws:SourceArn).
+    const cloudWatchAlarmSourceConditions = {
+      StringEquals: { 'aws:SourceAccount': this.account },
+      ArnLike: { 'aws:SourceArn': cdk.Arn.format({ service: 'cloudwatch', resource: 'alarm', resourceName: '*', arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME }, this) },
+    };
     let secretKey: kms.Key | undefined;
     if (cfg.encryptionKeyType === 'customer-managed') {
       secretKey = new kms.Key(this, 'ProvisioningKeyCmk', {
@@ -87,6 +93,8 @@ export class ZpaConnectorStack extends cdk.Stack {
         principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
         actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
         resources: ['*'],
+        // Only CloudWatch alarms in this account and Region (confused-deputy protection).
+        conditions: cloudWatchAlarmSourceConditions,
       }));
       // Allow EC2 Auto Scaling to launch connectors with CMK-encrypted root volumes
       // (cdk-nag AwsSolutions-EC26) and to publish scaling notifications into the
@@ -132,7 +140,8 @@ export class ZpaConnectorStack extends cdk.Stack {
     // AWS Secrets Manager cannot rotate a third-party SaaS enrollment key. Updating it
     // is a MANUAL activity: rotate/re-issue the key in the ZPA Admin Portal, then
     // `aws secretsmanager put-secret-value` and refresh the fleet. This finding is an
-    // accepted exception, documented here and in the README/L200/L300 guides.
+    // accepted exception, documented here, in the README Security section, and in the AWS
+    // documentation topic for this guidance.
 
     // ------------------------------------------------------------------
     // 3. Latest Marketplace AMI (by product code, resolved at deploy time)
@@ -221,8 +230,8 @@ export class ZpaConnectorStack extends cdk.Stack {
     //       CIDRs/ports are environment-specific and only known to the operator, and
     //       a wrong guess is worse than an explicit, reviewed manual rule. It is a
     //       MANUAL POST-DEPLOYMENT STEP — see the ManualBackendEgressStep stack
-    //       output and the deployment guide's "Backend egress (post-deployment)"
-    //       section. Do NOT bake a backend CIDR into this stack.
+    //       output, README Step 4.5, and "Add SAP backend and DNS egress" in the AWS
+    //       documentation topic. Do NOT bake a backend CIDR into this stack.
     // ------------------------------------------------------------------
     const sg = new ec2.SecurityGroup(this, 'ConnectorSg', {
       vpc,
@@ -286,11 +295,22 @@ export class ZpaConnectorStack extends cdk.Stack {
     // ------------------------------------------------------------------
     // 7. User data (boot sequence: clean OAuth state, then start the connector with the provisioning key)
     // ------------------------------------------------------------------
+    // Public key that signs the SSM Agent RPM, copied from the AWS Systems Manager User Guide
+    // ("Verify the signature of SSM Agent"). It expires on 2027-11-25; replace it when AWS
+    // publishes the next key. The fingerprint below is pinned and checked at boot.
+    const ssmAgentSigningKey = fs.readFileSync(path.join(__dirname, '..', 'assets', 'amazon-ssm-agent.gpg'), 'utf8').replace(/\r\n/g, '\n').trim();
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
       'set -uo pipefail',
       'exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1',
       'echo "[START] $(date)"',
+      // Close the first-boot OAuth window before anything else. The AMI starts zpa-connector at
+      // boot, before the provisioning key exists, and the connector begins device-code (OAuth)
+      // enrollment. Stop it and mask it for this boot, so that no patch or package script can
+      // start it again until the key is in place; clear the enrollment state it left behind.
+      'systemctl stop zpa-connector 2>/dev/null || true',
+      'systemctl mask --runtime zpa-connector 2>/dev/null || true',
+      'rm -f /opt/zscaler/var/.zrhi /opt/zscaler/var/oauth_enrollment_stats.json',
       // Region from IMDSv2 (token-based, matches the launch template's requireImdsv2)
       'TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")',
       'REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
@@ -303,18 +323,23 @@ export class ZpaConnectorStack extends cdk.Stack {
       'echo "[OK] AMI integrity check passed: AWS Marketplace product code $EXPECTED_PRODUCT_CODE"',
       `SECRET_NAME=${cfg.secretName}`,
       'mkdir -p /root/.aws && printf "[default]\\nregion = %s\\n" "$REGION" > /root/.aws/config',
-      '# Baseline OS + security patch',
+      '# Baseline OS + security patch (signed packages from the AMI repositories)',
       'yum update -y || true',
       'yum update --security -y || true',
       'yum install -y aws-cli jq curl unzip nc bind-utils || true',
-      '# --- SSM agent: clean reinstall from S3 + wait for registration ---',
-      'systemctl stop amazon-ssm-agent 2>/dev/null || true',
-      'yum remove -y amazon-ssm-agent 2>/dev/null || true',
-      'rm -rf /etc/amazon/ssm /var/lib/amazon/ssm',
-      'mkdir -p /tmp/ssm && cd /tmp/ssm',
-      'curl -O "https://s3.$REGION.amazonaws.com/amazon-ssm-$REGION/latest/linux_amd64/amazon-ssm-agent.rpm" || true',
-      'if [ ! -s ./amazon-ssm-agent.rpm ]; then curl -O https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm || true; fi',
-      'yum install -y --nogpgcheck ./amazon-ssm-agent.rpm || true',
+      // Agent package signatures. Both agents come from AWS S3 buckets, not from a yum repository,
+      // so each package is verified against an AWS public key whose fingerprint is pinned here
+      // (from the AWS documentation) before it is installed. Verification uses a throwaway
+      // keyring and rpm database, so nothing is added to the system trust store.
+      'VERIFY_DIR=$(mktemp -d /tmp/zpa-verify.XXXXXX); export GNUPGHOME="$VERIFY_DIR/gnupg"; mkdir -m 700 "$GNUPGHOME"',
+      `key_fpr() { gpg --batch --with-colons --import-options show-only --import "$1" 2>/dev/null | awk -F: '/^fpr/{print $10; exit}'; }`,
+      `cat > "$VERIFY_DIR/amazon-ssm-agent.gpg" <<'ZPA_SSM_SIGNING_KEY'\n${ssmAgentSigningKey}\nZPA_SSM_SIGNING_KEY`,
+      '# --- SSM agent: download, verify the embedded AWS signature, then clean reinstall + wait for registration ---',
+      'SSM_FPR=1C5B395CBE5E74E2F1CA21592784DBF388D19D46',
+      'curl -sfo "$VERIFY_DIR/amazon-ssm-agent.rpm" "https://s3.$REGION.amazonaws.com/amazon-ssm-$REGION/latest/linux_amd64/amazon-ssm-agent.rpm" || curl -sfo "$VERIFY_DIR/amazon-ssm-agent.rpm" https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm || true',
+      'SSM_OK=0; mkdir -p "$VERIFY_DIR/rpmdb"',
+      'if [ "$(key_fpr "$VERIFY_DIR/amazon-ssm-agent.gpg")" = "$SSM_FPR" ] && rpmkeys --dbpath "$VERIFY_DIR/rpmdb" --import "$VERIFY_DIR/amazon-ssm-agent.gpg" && rpmkeys --dbpath "$VERIFY_DIR/rpmdb" -K "$VERIFY_DIR/amazon-ssm-agent.rpm" | grep -q "signatures OK"; then SSM_OK=1; fi',
+      'if [ "$SSM_OK" = 1 ]; then echo "[OK] SSM Agent package signature verified (key 88D19D46)"; systemctl stop amazon-ssm-agent 2>/dev/null || true; yum remove -y amazon-ssm-agent 2>/dev/null || true; rm -rf /etc/amazon/ssm /var/lib/amazon/ssm; rpm -Uvh "$VERIFY_DIR/amazon-ssm-agent.rpm" || true; else echo "[WARN] SSM Agent package signature NOT verified: keeping the SSM Agent already in the AMI"; fi',
       'systemctl daemon-reload; systemctl enable amazon-ssm-agent; systemctl start amazon-ssm-agent || true',
       'for i in $(seq 1 24); do sleep 5; if systemctl is-active --quiet amazon-ssm-agent && [ -f /var/lib/amazon/ssm/registration ]; then echo "SSM registered after $((i*5))s"; break; fi; systemctl start amazon-ssm-agent 2>/dev/null || true; done',
       '# --- ZPA connector provisioning ---',
@@ -325,16 +350,19 @@ export class ZpaConnectorStack extends cdk.Stack {
       '# Provisioning key from Secrets Manager (create file first, then populate - perms 644 as the AMI expects)',
       'touch /opt/zscaler/var/provision_key && chmod 644 /opt/zscaler/var/provision_key',
       'aws secretsmanager get-secret-value --secret-id "$SECRET_NAME" --region "$REGION" --query SecretString --output text > /opt/zscaler/var/provision_key',
-      '# CRITICAL: clear stale device-code/OAuth enrollment state left by the AMI auto-start,',
-      '# otherwise the connector resumes interactive OAuth ("enter code in browser") and never reads the key.',
+      '# Clear any OAuth enrollment state again (a package update could have started the service before the mask), then start the connector once on a clean state',
       'rm -f /opt/zscaler/var/.zrhi /opt/zscaler/var/oauth_enrollment_stats.json',
-      '# Start the connector fresh - it now reads the provisioning key on a clean state',
+      'systemctl unmask --runtime zpa-connector 2>/dev/null || true',
       'systemctl restart zpa-connector || systemctl start zpa-connector || true',
-      '# CloudWatch agent (install from the S3 RPM - the RHEL9 Zscaler AMI has no yum entry for it)',
-      'curl -o /tmp/amazon-cloudwatch-agent.rpm "https://amazoncloudwatch-agent.s3.amazonaws.com/redhat/amd64/latest/amazon-cloudwatch-agent.rpm" || true',
-      'if [ ! -s /tmp/amazon-cloudwatch-agent.rpm ]; then curl -o /tmp/amazon-cloudwatch-agent.rpm "https://amazoncloudwatch-agent-$REGION.s3.$REGION.amazonaws.com/redhat/amd64/latest/amazon-cloudwatch-agent.rpm" || true; fi',
-      'rpm -Uvh --nodeps /tmp/amazon-cloudwatch-agent.rpm || yum install -y --nogpgcheck /tmp/amazon-cloudwatch-agent.rpm || true',
+      '# --- CloudWatch agent: download, verify the AWS detached signature, then install (the RHEL9 Zscaler AMI has no yum entry for it) ---',
+      'CW_FPR=937616F3450B7D806CBD9725D58167303B789C72',
+      'CW_BASE=https://amazoncloudwatch-agent.s3.amazonaws.com',
+      'curl -sfo "$VERIFY_DIR/cw.rpm" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm" || { CW_BASE="https://amazoncloudwatch-agent-$REGION.s3.$REGION.amazonaws.com"; curl -sfo "$VERIFY_DIR/cw.rpm" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm"; } || true',
+      'curl -sfo "$VERIFY_DIR/cw.rpm.sig" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm.sig" || true',
+      'curl -sfo "$VERIFY_DIR/cw.gpg" https://amazoncloudwatch-agent.s3.amazonaws.com/assets/amazon-cloudwatch-agent.gpg || true',
+      'if [ "$(key_fpr "$VERIFY_DIR/cw.gpg")" = "$CW_FPR" ] && gpg --batch --import "$VERIFY_DIR/cw.gpg" 2>/dev/null && gpg --batch --status-fd 1 --verify "$VERIFY_DIR/cw.rpm.sig" "$VERIFY_DIR/cw.rpm" 2>/dev/null | grep -qF "[GNUPG:] VALIDSIG $CW_FPR "; then echo "[OK] CloudWatch agent package signature verified (key 3B789C72)"; rpm -Uvh --nodeps --replacepkgs "$VERIFY_DIR/cw.rpm" || true; else echo "[WARN] CloudWatch agent package signature NOT verified: not installing it"; fi',
       `/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c ssm:${CW_AGENT_PARAM} || true`,
+      'rm -rf "$VERIFY_DIR"',
       'touch /var/log/user-data-completed',
       'echo "[END] $(date)"',
     );
@@ -366,6 +394,8 @@ export class ZpaConnectorStack extends cdk.Stack {
           principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
           actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
           resources: ['*'],
+          // Only CloudWatch alarms in this account and Region (confused-deputy protection).
+          conditions: cloudWatchAlarmSourceConditions,
         }));
         // ASG scaling notifications (AwsSolutions-AS3) are published as the EC2 Auto
         // Scaling service-linked role; see the precheck scripts for its existence check.
@@ -393,6 +423,9 @@ export class ZpaConnectorStack extends cdk.Stack {
       role,
       securityGroup: sg,
       requireImdsv2: true,
+      // Connectors never get a public IP address, even if a subnet in privateSubnetIds
+      // auto-assigns one. They reach the internet only through NAT or central egress.
+      associatePublicIpAddress: false,
       userData,
       blockDevices: [{
         deviceName: '/dev/xvda',
@@ -572,13 +605,23 @@ export class ZpaConnectorStack extends cdk.Stack {
         encryptionMasterKey: secretKey,
       });
 
-      // Dedicated SG for the VPC-attached updater Lambda: no inbound, egress to
-      // AWS APIs only (443). allowAllOutbound keeps it to the standard egress path.
+      // Dedicated SG for the VPC-attached updater Lambda: no inbound, and outbound TCP 443 only
+      // (the AWS service APIs). DNS goes to the VPC resolver, which security groups don't filter.
+      // The description is unchanged so existing stacks update the rules in place.
       const updaterFnSg = new ec2.SecurityGroup(this, 'AmiUpdaterFnSg', {
         vpc,
         description: 'ZPA AMI-updater Lambda - outbound to AWS APIs only, no inbound',
-        allowAllOutbound: true,
+        allowAllOutbound: false,
       });
+      updaterFnSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'AWS service APIs (HTTPS)');
+
+      // Alarms the instance refresh watches. If one goes to ALARM during a refresh, Amazon EC2
+      // Auto Scaling rolls the refresh back. Both treat missing data as not breaching, so they are
+      // OK when a refresh starts. FleetBelowMin is not used: an instance refresh intentionally
+      // replaces instances, and that alarm must page rather than block.
+      const rollbackAlarms = ['EnrollmentBackoffAlarm', 'OAuth401Alarm']
+        .map((id) => this.node.tryFindChild(id) as cloudwatch.Alarm | undefined)
+        .filter((a): a is cloudwatch.Alarm => a !== undefined);
 
       const updaterFn = new lambda.Function(this, 'AmiUpdaterFn', {
         functionName: `zpa-ami-updater-${this.region}`,
@@ -591,7 +634,11 @@ export class ZpaConnectorStack extends cdk.Stack {
           LAUNCH_TEMPLATE_ID: lt.launchTemplateId!,
           ASG_NAME: asg.autoScalingGroupName,
           ZPA_PRODUCT_CODE: cfg.zpaProductCode,
-          INSTANCE_REFRESH: 'true',
+          // Weekly automatic rollout of a new AMI. Set amiUpdaterInstanceRefresh=false for
+          // notify-only: the function still creates the new launch template version and sends
+          // the notification, and an operator starts the refresh after review.
+          INSTANCE_REFRESH: cfg.amiUpdaterInstanceRefresh ? 'true' : 'false',
+          ROLLBACK_ALARMS: rollbackAlarms.map((a) => a.alarmName).join(','),
           SNS_TOPIC_ARN: alarmTopic?.topicArn ?? '',
         },
         // security review — LAMBDA_CONCURRENCY_CHECK: cap concurrency. This function
@@ -626,6 +673,8 @@ export class ZpaConnectorStack extends cdk.Stack {
       const ec2Arn = (resource: string, account = this.account) =>
         cdk.Arn.format({ service: 'ec2', resource, resourceName: '*', account }, this);
       const ownLaunchTemplateArn = cdk.Arn.format({ service: 'ec2', resource: 'launch-template', resourceName: lt.launchTemplateId! }, this);
+      // Resources the Auto Scaling group itself supplies (the subnet and the network interface it
+      // creates there), plus the instance and volumes it launches: only through this launch template.
       updaterFn.addToRolePolicy(new iam.PolicyStatement({
         sid: 'RunInstancesViaOwnLaunchTemplate',
         actions: ['ec2:RunInstances'],
@@ -635,11 +684,31 @@ export class ZpaConnectorStack extends cdk.Stack {
           ec2Arn('volume'),
           ec2Arn('network-interface'),
           ec2Arn('subnet'),
-          ec2Arn('security-group'),
-          ec2Arn('image', ''),     // Marketplace AMIs are owned by another account
           ec2Arn('snapshot', ''),  // the AMI's root snapshot
         ],
         conditions: { ArnLike: { 'ec2:LaunchTemplate': ownLaunchTemplateArn } },
+      }));
+      // The image and security groups must come from the launch template itself
+      // (ec2:IsLaunchTemplateResource), so a RunInstances call can't override them. The image must
+      // also be an AWS Marketplace image (ec2:Owner).
+      updaterFn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'RunInstancesLaunchTemplateImageAndSg',
+        actions: ['ec2:RunInstances'],
+        resources: [ec2Arn('security-group')],
+        conditions: {
+          ArnLike: { 'ec2:LaunchTemplate': ownLaunchTemplateArn },
+          Bool: { 'ec2:IsLaunchTemplateResource': 'true' },
+        },
+      }));
+      updaterFn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'RunInstancesMarketplaceImageOnly',
+        actions: ['ec2:RunInstances'],
+        resources: [ec2Arn('image', '')],  // Marketplace AMIs are owned by another account
+        conditions: {
+          ArnLike: { 'ec2:LaunchTemplate': ownLaunchTemplateArn },
+          Bool: { 'ec2:IsLaunchTemplateResource': 'true' },
+          StringEquals: { 'ec2:Owner': 'aws-marketplace' },
+        },
       }));
       updaterFn.addToRolePolicy(new iam.PolicyStatement({
         sid: 'TagOnlyDuringRunInstances',
@@ -670,6 +739,33 @@ export class ZpaConnectorStack extends cdk.Stack {
         )],
       }));
       if (alarmTopic) alarmTopic.grantPublish(updaterFn);
+      if (rollbackAlarms.length > 0) {
+        // Read access to the two rollback alarms only.
+        updaterFn.addToRolePolicy(new iam.PolicyStatement({
+          sid: 'DescribeRollbackAlarms',
+          actions: ['cloudwatch:DescribeAlarms'],
+          resources: rollbackAlarms.map((a) => a.alarmArn),
+        }));
+      }
+      if (alarmTopic) {
+        // Alarm: the AMI updater failed (Lambda errors) or a failed run reached the dead-letter queue.
+        new cloudwatch.Alarm(this, 'AmiUpdaterErrorsAlarm', {
+          alarmDescription: 'ZPA AMI updater Lambda function returned an error',
+          metric: updaterFn.metricErrors({ period: cdk.Duration.minutes(5), statistic: 'Sum' }),
+          threshold: 1,
+          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+          evaluationPeriods: 1,
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        }).addAlarmAction(new cwactions.SnsAction(alarmTopic));
+        new cloudwatch.Alarm(this, 'AmiUpdaterDlqAlarm', {
+          alarmDescription: 'ZPA AMI updater dead-letter queue has messages',
+          metric: updaterDlq.metricApproximateNumberOfMessagesVisible({ period: cdk.Duration.minutes(5), statistic: 'Maximum' }),
+          threshold: 1,
+          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+          evaluationPeriods: 1,
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        }).addAlarmAction(new cwactions.SnsAction(alarmTopic));
+      }
       NagSuppressions.addResourceSuppressions(updaterFn, [
         {
           id: 'AwsSolutions-IAM4',
@@ -720,9 +816,12 @@ export class ZpaConnectorStack extends cdk.Stack {
         `The connector INITIATES sessions to backends, so it needs egress to the app ports/CIDRs it serves ` +
         `(over and above 443/80 to the Zscaler cloud). If the VPC DHCP options use your own DNS servers instead of AmazonProvidedDNS, ` +
         `also add UDP and TCP 53 egress to those servers so the connector can resolve the SAP host names. ` +
-        `Confirm the backend supernet CIDR + required ports with the app owner, then for example: ` +
-        `aws ec2 authorize-security-group-egress --group-id ${sg.securityGroupId} --region ${cfg.region} ` +
-        `--ip-permissions "IpProtocol=-1,IpRanges=[{CidrIp=<BACKEND_SUPERNET_CIDR>,Description=backend apps}]"`,
+        `Allow only the ports your ZPA application segments use, to the backend CIDR, for example the SAP ports: ` +
+        `aws ec2 authorize-security-group-egress --group-id ${sg.securityGroupId} --region ${cfg.region} --ip-permissions ` +
+        `"IpProtocol=tcp,FromPort=3200,ToPort=3299,IpRanges=[{CidrIp=<SAP_CIDR>,Description=SAP dispatcher}]" ` +
+        `"IpProtocol=tcp,FromPort=3300,ToPort=3399,IpRanges=[{CidrIp=<SAP_CIDR>,Description=SAP gateway}]" ` +
+        `"IpProtocol=tcp,FromPort=3600,ToPort=3699,IpRanges=[{CidrIp=<SAP_CIDR>,Description=SAP message server}]" ` +
+        `"IpProtocol=tcp,FromPort=44300,ToPort=44300,IpRanges=[{CidrIp=<SAP_CIDR>,Description=SAP HTTPS}]". Never 0.0.0.0/0.`,
     });
     new cdk.CfnOutput(this, 'ActionRequired', {
       value: `1) Populate secret '${cfg.secretName}' with the ZPA provisioning key, then refresh the ASG.  2) Add backend app egress, and DNS egress if you use your own DNS servers, to SG ${sg.securityGroupId} (see ManualBackendEgressStep).`,

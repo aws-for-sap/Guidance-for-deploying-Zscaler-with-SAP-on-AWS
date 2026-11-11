@@ -1,0 +1,4 @@
+# Shell scripts and the agent signing key must keep LF line endings, including in a Windows
+# checkout with core.autocrlf=true.
+*.sh text eol=lf
+assets/*.gpg text eol=lf
