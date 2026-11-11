@@ -40,13 +40,6 @@ export interface ZpaConfig {
    *                        as accepted exceptions. Choose this only where a dedicated CMK is not wanted.
    */
   encryptionKeyType: 'aws-managed' | 'customer-managed';
-  /**
-   * IPv4 CIDRs the connector may send DNS (UDP/TCP 53) to. Default: empty, which scopes DNS to the VPC CIDR.
-   * Set this to your DNS server IPs (as /32s) when the VPC DHCP options point at DNS servers outside the VPC.
-   * The Amazon-provided VPC resolver is not filtered by security groups, so the default works with the
-   * in-VPC Route 53 Resolver (including outbound-endpoint forwarding).
-   */
-  dnsServerCidrs: string[];
   /** SSM PatchGroup tag value binding connectors to the sequential patch path. */
   patchGroup: string;
   /** Zscaler ZPA App Connector Marketplace product code. */
@@ -54,6 +47,12 @@ export interface ZpaConfig {
 
   /** Provision the weekly AMI-updater Lambda + EventBridge rule. Default true. */
   enableAmiUpdater: boolean;
+  /**
+   * Let the AMI updater start the rolling instance refresh itself. Default true. Set false for
+   * notify-only: the updater creates the new launch template version and notifies, and an operator
+   * starts the refresh after review.
+   */
+  amiUpdaterInstanceRefresh: boolean;
   /** Provision a standalone weekly sequential SSM Maintenance Window. Default true. */
   enablePatching: boolean;
   /** Provision CloudWatch alarms + SNS. Default true. */
@@ -61,7 +60,7 @@ export interface ZpaConfig {
   /** Email subscribed to the alarm SNS topic. Required when enableAlarms is true. */
   alarmEmail: string;
 
-  /** Cron for the patch Maintenance Window. Default Sunday 02:00 UTC. */
+  /** Cron for the patch Maintenance Window, in UTC. Default Saturday 03:00 UTC, a placeholder: set your own window. */
   patchWindowCron: string;
   /** Cron for the AMI-updater check. Default Sunday 00:00 UTC. */
   amiUpdaterCron: string;
@@ -107,14 +106,14 @@ export function loadZpaConfig(app: cdk.App): ZpaConfig {
     encryptionKeyType: (String(pick('encryptionKeyType') ?? 'customer-managed').toLowerCase() === 'aws-managed'
       ? 'aws-managed'
       : 'customer-managed') as 'aws-managed' | 'customer-managed',
-    dnsServerCidrs: asStrArray(pick('dnsServerCidrs')).filter((s) => s.length > 0),
     patchGroup: String(pick('patchGroup') ?? 'zpa-sequential'),
     zpaProductCode: String(pick('zpaProductCode') ?? 'by1wc5269g0048ix2nqvr0362'),
     enableAmiUpdater: asBool(pick('enableAmiUpdater'), true),
+    amiUpdaterInstanceRefresh: asBool(pick('amiUpdaterInstanceRefresh'), true),
     enablePatching: asBool(pick('enablePatching'), true),
     enableAlarms: asBool(pick('enableAlarms'), true),
     alarmEmail: String(pick('alarmEmail') ?? ''),
-    patchWindowCron: String(pick('patchWindowCron') ?? 'cron(0 2 ? * SUN *)'),
+    patchWindowCron: String(pick('patchWindowCron') ?? 'cron(0 3 ? * SAT *)'),
     amiUpdaterCron: String(pick('amiUpdaterCron') ?? 'cron(0 0 ? * SUN *)'),
   };
 
@@ -133,10 +132,6 @@ export function loadZpaConfig(app: cdk.App): ZpaConfig {
   }
   if (cfg.enableAlarms && !cfg.alarmEmail) {
     errs.push('zpa:alarmEmail is required when enableAlarms is true (or set enableAlarms=false)');
-  }
-  const cidrRe = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}\/(3[0-2]|[12]?\d)$/;
-  for (const c of cfg.dnsServerCidrs) {
-    if (!cidrRe.test(c)) errs.push(`zpa:dnsServerCidrs entry '${c}' is not an IPv4 CIDR (for a single server use a.b.c.d/32)`);
   }
   const rawKeyType = pick('encryptionKeyType');
   if (rawKeyType !== undefined && rawKeyType !== null && rawKeyType !== '') {

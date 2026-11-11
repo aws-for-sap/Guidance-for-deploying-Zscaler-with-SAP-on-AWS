@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # the backticks are JMESPath literals inside --query strings, not shell expansions
 # ============================================================================
 # ZPA Connector CDK — pre-deployment prerequisite check (Linux / macOS / Cloud Shell)
 #
@@ -91,13 +92,15 @@ if [[ -z "$VPC" ]]; then
 else
   DNS_SUP=$("${AWS[@]}" ec2 describe-vpc-attribute --vpc-id "$VPC" --attribute enableDnsSupport   --query 'EnableDnsSupport.Value'   --output text 2>/dev/null)
   DNS_HOST=$("${AWS[@]}" ec2 describe-vpc-attribute --vpc-id "$VPC" --attribute enableDnsHostnames --query 'EnableDnsHostnames.Value' --output text 2>/dev/null)
-  [[ "$DNS_SUP" == "True" ]]  && ok "enableDnsSupport = true"   || bad "enableDnsSupport is not true"
-  [[ "$DNS_HOST" == "True" ]] && ok "enableDnsHostnames = true" || bad "enableDnsHostnames is not true"
+  if [[ "$DNS_SUP" == "True" ]];  then ok "enableDnsSupport = true";   else bad "enableDnsSupport is not true"; fi
+  if [[ "$DNS_HOST" == "True" ]]; then ok "enableDnsHostnames = true"; else bad "enableDnsHostnames is not true"; fi
 fi
 echo
 
-# 3. Subnets: two, different AZs, each with a NAT default route
+# 3. Subnets: two, different AZs, each with a default route to a NAT gateway
+#    (regional or zonal) or to a transit gateway (centralized egress VPC)
 echo "3. Private subnets"
+EGRESS_TGW=0
 if [[ -z "$SUBNETS" ]]; then
   if [[ -n "$VPC" ]]; then
     info "No --subnets supplied; private-looking subnets in $VPC (no public IP on launch):"
@@ -112,9 +115,13 @@ else
   UNIQ=$(echo "$AZS" | tr '\t' '\n' | sort -u | wc -l | tr -d ' ')
   if [[ "$UNIQ" == "2" ]]; then ok "Subnets are in 2 distinct AZs ($AZS)"; else bad "Subnets are not in 2 distinct AZs ($AZS)"; fi
   for S in "$S1" "$S2"; do
-    NAT=$("${AWS[@]}" ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$S" \
-      --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId' --output text 2>/dev/null)
-    if [[ -n "$NAT" && "$NAT" != "None" ]]; then ok "$S has default route via NAT ($NAT)"; else bad "$S has no NAT default route (outbound internet required)"; fi
+    RT=$("${AWS[@]}" ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$S" \
+      --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`].[NatGatewayId,TransitGatewayId]' --output text 2>/dev/null)
+    NAT=$(grep -o 'nat-[0-9a-f]*' <<< "$RT" | head -n1)
+    TGW=$(grep -o 'tgw-[0-9a-f]*' <<< "$RT" | head -n1)
+    if [[ -n "$NAT" ]]; then ok "$S has default route via NAT gateway ($NAT)"
+    elif [[ -n "$TGW" ]]; then ok "$S has default route via transit gateway ($TGW, centralized egress)"; EGRESS_TGW=1
+    else bad "$S has no default route to a NAT gateway or transit gateway (outbound internet required)"; fi
   done
 fi
 echo
@@ -124,7 +131,9 @@ echo "4. NAT gateways"
 if [[ -n "$VPC" ]]; then
   NATS=$("${AWS[@]}" ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$VPC" \
     --query 'NatGateways[?State==`available`].NatGatewayId' --output text 2>/dev/null)
-  if [[ -n "$NATS" ]]; then ok "Available NAT gateway(s): $NATS"; else bad "No available NAT gateway in $VPC"; fi
+  if [[ -n "$NATS" ]]; then ok "Available NAT gateway(s): $NATS"
+  elif [[ "$EGRESS_TGW" == "1" ]]; then info "No NAT gateway in $VPC; the subnets use a centralized egress VPC. Confirm it allows outbound TCP 443."
+  else bad "No available NAT gateway in $VPC"; fi
 else
   info "Skipped (no --vpc)."
 fi
@@ -143,7 +152,8 @@ if ARN=$("${AWS[@]}" secretsmanager describe-secret --secret-id "$SECRET" --quer
   info "The CDK stack manages this secret; ensure its value is the real provisioning key (not the placeholder)."
 else
   info "Secret does not exist yet — the CDK stack will CREATE it empty; populate it after deploy:"
-  info "  aws --profile $PROFILE --region $REGION secretsmanager put-secret-value --secret-id $SECRET --secret-string '<PROVISIONING_KEY>'"
+  info "  Save the key to provisioning-key.txt with an editor (not on the command line), then:"
+  info "  aws --profile $PROFILE --region $REGION secretsmanager put-secret-value --secret-id $SECRET --secret-string file://provisioning-key.txt && shred -u provisioning-key.txt"
 fi
 echo
 
@@ -161,4 +171,4 @@ fi
 echo
 
 echo "== RESULT: $PASS passed, $FAIL failed =="
-[[ "$FAIL" -eq 0 ]] && { echo "All required checks passed. Safe to cdk deploy."; exit 0; } || { echo "Fix the FAIL items before deploying."; exit 1; }
+if [[ "$FAIL" -eq 0 ]]; then echo "All required checks passed. Safe to cdk deploy."; exit 0; else echo "Fix the FAIL items before deploying."; exit 1; fi

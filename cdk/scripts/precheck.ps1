@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    ZPA Connector CDK — pre-deployment prerequisite check (Windows / PowerShell).
+    ZPA Connector CDK - pre-deployment prerequisite check (Windows / PowerShell).
     Validates the prerequisites the CDK app does NOT create, and SUGGESTS a VPC
     and key pair to use. Read-only: it changes nothing.
 
@@ -11,6 +11,7 @@
 .NOTES
     Exit code 0 = all required checks passed; non-zero = at least one failed.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive precheck: colored PASS/FAIL console output is the purpose of this script. The result is also returned as the exit code.')]
 param(
     [Parameter(Mandatory=$true)][string]$Profile,
     [Parameter(Mandatory=$true)][string]$Region,
@@ -79,6 +80,7 @@ Write-Host ""
 
 # 3. Private subnets
 Write-Host "3. Private subnets"
+$egressTgw = $false
 if (-not $Subnets) {
     if ($Vpc) {
         Info "No -Subnets supplied; private-looking subnets in $Vpc :"
@@ -91,19 +93,26 @@ if (-not $Subnets) {
     $azs = aws @AWS ec2 describe-subnets --subnet-ids $parts --query 'Subnets[].AvailabilityZone' --output text 2>$null
     $uniq = ($azs -split "\s+" | Sort-Object -Unique).Count
     if ($uniq -eq 2) { Ok "Subnets are in 2 distinct AZs ($azs)" } else { Bad "Subnets are not in 2 distinct AZs ($azs)" }
+    # Default route to a NAT gateway (regional or zonal) or to a transit gateway (centralized egress VPC)
     foreach ($s in $parts) {
-        $nat = aws @AWS ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$s" `
-            --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId' --output text 2>$null
-        if ($nat -and $nat -ne "None") { Ok "$s has default route via NAT ($nat)" } else { Bad "$s has no NAT default route (outbound internet required)" }
+        $rt = aws @AWS ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$s" `
+            --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`].[NatGatewayId,TransitGatewayId]' --output text 2>$null
+        $nat = [regex]::Match("$rt", 'nat-[0-9a-f]+').Value
+        $tgw = [regex]::Match("$rt", 'tgw-[0-9a-f]+').Value
+        if ($nat) { Ok "$s has default route via NAT gateway ($nat)" }
+        elseif ($tgw) { Ok "$s has default route via transit gateway ($tgw, centralized egress)"; $egressTgw = $true }
+        else { Bad "$s has no default route to a NAT gateway or transit gateway (outbound internet required)" }
     }
 }
 Write-Host ""
 
-# 4. NAT gateways
+# 4. NAT gateways (not required when the subnets use a centralized egress VPC)
 Write-Host "4. NAT gateways"
 if ($Vpc) {
     $nats = aws @AWS ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$Vpc" --query 'NatGateways[?State==`available`].NatGatewayId' --output text 2>$null
-    if ($nats) { Ok "Available NAT gateway(s): $nats" } else { Bad "No available NAT gateway in $Vpc" }
+    if ($nats) { Ok "Available NAT gateway(s): $nats" }
+    elseif ($egressTgw) { Info "No NAT gateway in $Vpc; the subnets use a centralized egress VPC. Confirm it allows outbound TCP 443." }
+    else { Bad "No available NAT gateway in $Vpc" }
 } else { Info "Skipped (no -Vpc)." }
 Write-Host ""
 
@@ -121,7 +130,8 @@ if ($LASTEXITCODE -eq 0 -and $arn) {
     Info "The CDK stack manages this secret; ensure its value is the real provisioning key (not the placeholder)."
 } else {
     Info "Secret does not exist yet - the CDK stack will CREATE it empty; populate it after deploy:"
-    Info "  aws --profile $Profile --region $Region secretsmanager put-secret-value --secret-id $Secret --secret-string '<PROVISIONING_KEY>'"
+    Info "  Save the key to provisioning-key.txt with an editor (not on the command line), then:"
+    Info "  aws --profile $Profile --region $Region secretsmanager put-secret-value --secret-id $Secret --secret-string file://provisioning-key.txt; Remove-Item provisioning-key.txt"
 }
 Write-Host ""
 

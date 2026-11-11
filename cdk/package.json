@@ -1,6 +1,7 @@
 {
   "name": "cdk-zpa-connector",
   "version": "1.0.0",
+  "license": "MIT-0",
   "description": "AWS CDK app for deploying Zscaler ZPA App Connectors (HA, 2-AZ, ASG, Secrets Manager, weekly sequential patching, CloudWatch monitoring)",
   "bin": {
     "cdk-zpa-connector": "bin/cdk-zpa-connector.ts"

@@ -22,17 +22,18 @@
       "instanceType": "m5a.large",
       "volumeSizeGiB": 80,
       "secretName": "zpa-connector",
-  "_comment_dnsServerCidrs": "IPv4 CIDRs for DNS egress (UDP/TCP 53). Empty (default) = the VPC CIDR, which covers the in-VPC Route 53 Resolver. List your DNS server IPs as /32s when the VPC DHCP options use DNS servers outside the VPC.",
-  "dnsServerCidrs": [],
       "_comment_encryptionKeyType": "Secret + log group (and SNS topic + DLQ) encryption. 'customer-managed' (DEFAULT) = one dedicated KMS CMK with annual rotation, self-owned and auditable (~$1/mo/key); clears the CKV_AWS_149 / SECRETSMANAGER_USING_CMK / CLOUDWATCH_LOG_GROUP_ENCRYPTED review findings with no exception. 'aws-managed' = opt-out to AWS-owned/managed keys (aws/secretsmanager + AWS-owned CloudWatch Logs key + aws/sns + SQS-managed), no extra cost but the CMK findings reappear as accepted exceptions.",
       "encryptionKeyType": "customer-managed",
       "patchGroup": "zpa-sequential",
       "zpaProductCode": "by1wc5269g0048ix2nqvr0362",
       "enableAmiUpdater": true,
+      "_comment_amiUpdaterInstanceRefresh": "true (default) = the AMI updater starts a rolling instance refresh with automatic rollback. false = notify-only: it creates the new launch template version and notifies, and an operator starts the refresh after review.",
+      "amiUpdaterInstanceRefresh": true,
       "enablePatching": true,
       "enableAlarms": true,
       "alarmEmail": "",
-      "patchWindowCron": "cron(0 2 ? * SUN *)",
+      "_comment_patchWindowCron": "Weekly patch Maintenance Window, in UTC. The default (Saturday 03:00 UTC) is a placeholder: set your own window, outside your peak SAP usage and away from amiUpdaterCron.",
+      "patchWindowCron": "cron(0 3 ? * SAT *)",
       "amiUpdaterCron": "cron(0 0 ? * SUN *)"
     }
   }
