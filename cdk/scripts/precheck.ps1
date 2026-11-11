@@ -111,7 +111,7 @@ Write-Host "4. NAT gateways"
 if ($Vpc) {
     $nats = aws @AWS ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$Vpc" --query 'NatGateways[?State==`available`].NatGatewayId' --output text 2>$null
     if ($nats) { Ok "Available NAT gateway(s): $nats" }
-    elseif ($egressTgw) { Info "No NAT gateway in $Vpc; the subnets use a centralized egress VPC. Confirm it allows outbound TCP 80 and 443." }
+    elseif ($egressTgw) { Info "No NAT gateway in $Vpc; the subnets use a centralized egress VPC. Confirm it allows outbound TCP 443." }
     else { Bad "No available NAT gateway in $Vpc" }
 } else { Info "Skipped (no -Vpc)." }
 Write-Host ""

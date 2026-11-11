@@ -179,6 +179,13 @@ export class ZpaConnectorStack extends cdk.Stack {
       actions: ['s3:GetObject'],
       resources: ['arn:aws:s3:::aws-quicksetup-patchpolicy-*'],
     }));
+    // Boot-time AMI owner check (user data). DescribeImages supports no resource-level
+    // permissions, so it needs Resource *. Read-only.
+    role.addToPolicy(new iam.PolicyStatement({
+      sid: 'DescribeOwnAmiAtBoot',
+      actions: ['ec2:DescribeImages'],
+      resources: ['*'],
+    }));
     // Allow reading the CW-agent config parameter
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['ssm:GetParameter'],
@@ -199,21 +206,26 @@ export class ZpaConnectorStack extends cdk.Stack {
         reason: 'Read-only s3:GetObject on the AWS-created SSM Quick Setup patch-policy baseline buckets, whose names carry an account/region suffix that is not known at synth time.',
         appliesTo: ['Resource::arn:aws:s3:::aws-quicksetup-patchpolicy-*'],
       },
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'Read-only ec2:DescribeImages for the boot-time AMI owner check. The action supports no resource-level permissions, so AWS requires Resource *.',
+        appliesTo: ['Resource::*'],
+      },
     ], true);
 
     // ------------------------------------------------------------------
-    // 5. Security group — NO ZPA inbound; egress 80/443 only
+    // 5. Security group — NO ZPA inbound; egress TCP 443 only
     // ------------------------------------------------------------------
     // The connector needs TWO distinct classes of outbound egress:
     //
-    //   (a) TO THE ZSCALER CLOUD  — TCP 443/80 to 0.0.0.0/0 (managed here, below).
-    //       Required for enrollment + the TLS broker tunnels. Zscaler does NOT
-    //       publish a stable, enumerable IP allow-list: the connector reaches the
-    //       NEAREST broker / Service Edge across Zscaler's global anycast cloud, and
-    //       those endpoints change by region and over time. Zscaler's guidance is
-    //       domain/port-based (outbound 443, no inbound), not CIDR-based, so pinning
-    //       to fixed CIDRs would break connectivity. Per the Zscaler AWS Deployment
-    //       Guide these are the mandatory outbound ports for cloud communication.
+    //   (a) TO THE ZSCALER CLOUD  — TCP 443 to 0.0.0.0/0 (managed here, below).
+    //       Required for enrollment + the TLS broker tunnels. Zscaler's ZPA firewall
+    //       allowlist (config.zscaler.com) lists only port 443 for App Connectors, across
+    //       about 1,300 CIDR ranges that change most months: far more than a security
+    //       group or managed prefix list can hold, so the destination is 0.0.0.0/0 and
+    //       the control is the port plus TLS. TCP 80 was removed: the allowlist doesn't
+    //       list it, the Zscaler AWS Deployment Guide checklist names only TCP/443, and a
+    //       live connector used only 443.
     //       (security review — EC2_SECURITY_GROUP_EGRESS_OPEN_TO_WORLD_RULE:
     //       0.0.0.0/0 on these ports is the documented, accepted posture.)
     //
@@ -238,12 +250,13 @@ export class ZpaConnectorStack extends cdk.Stack {
       // Keep this description STABLE. CloudFormation cannot change a security group's
       // description in place: any edit REPLACES the group, which drops the manually
       // added backend egress rules (section (b) above) on every existing deployment.
+      // The text still says 80/443/DNS from earlier versions. It is deliberately NOT
+      // updated: changing it would replace the group. The rules below are authoritative.
       description: 'ZPA App Connector - outbound-only (80/443/DNS to 0.0.0.0/0, required for the Zscaler cloud). No inbound; admin via SSM Session Manager.',
       allowAllOutbound: false,
     });
     // (a) Zscaler cloud egress — managed by the CDK (required, no fixed CIDR list).
     sg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'ZPA cloud (TLS tunnels + enrollment) - Zscaler publishes no fixed CIDR list');
-    sg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'ZPA cloud (bootstrap / CRL)');
     // DNS egress is NOT created here. With AmazonProvidedDNS the connector resolves
     // through the VPC resolver (VPC+2), which security groups do not filter, so no rule
     // is needed. If the VPC DHCP options point at your own DNS servers, add UDP and TCP 53
@@ -293,7 +306,7 @@ export class ZpaConnectorStack extends cdk.Stack {
     });
 
     // ------------------------------------------------------------------
-    // 7. User data (boot sequence: clean OAuth state, then start the connector with the provisioning key)
+    // 7. User data (boot sequence: stop the connector, AMI checks, signed agents, then the key and the connector)
     // ------------------------------------------------------------------
     // Public key that signs the SSM Agent RPM, copied from the AWS Systems Manager User Guide
     // ("Verify the signature of SSM Agent"). It expires on 2027-11-25; replace it when AWS
@@ -327,6 +340,13 @@ export class ZpaConnectorStack extends cdk.Stack {
       'yum update -y || true',
       'yum update --security -y || true',
       'yum install -y aws-cli jq curl unzip nc bind-utils || true',
+      // AMI owner check: the product code alone also passes a COPY of the Marketplace AMI. The
+      // instance's own AMI must have the owner alias aws-marketplace, which only AWS can set.
+      // Fail closed, before the key is read (needs ec2:DescribeImages on the instance role).
+      'AMI_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/ami-id)',
+      'AMI_OWNER=""; for i in 1 2 3 4 5; do AMI_OWNER=$(aws ec2 describe-images --region "$REGION" --image-ids "$AMI_ID" --query "Images[0].ImageOwnerAlias" --output text 2>/dev/null) && [ -n "$AMI_OWNER" ] && break; sleep 5; done',
+      'if [ "$AMI_OWNER" != aws-marketplace ]; then echo "[FATAL] AMI owner check failed: $AMI_ID has owner alias [$AMI_OWNER], not aws-marketplace. Not reading the provisioning key. Shutting down."; shutdown -h now; exit 1; fi',
+      'echo "[OK] AMI owner check passed: $AMI_ID is an AWS Marketplace image"',
       // Agent package signatures. Both agents come from AWS S3 buckets, not from a yum repository,
       // so each package is verified against an AWS public key whose fingerprint is pinned here
       // (from the AWS documentation) before it is installed. Verification uses a throwaway
@@ -342,7 +362,18 @@ export class ZpaConnectorStack extends cdk.Stack {
       'if [ "$SSM_OK" = 1 ]; then echo "[OK] SSM Agent package signature verified (key 88D19D46)"; systemctl stop amazon-ssm-agent 2>/dev/null || true; yum remove -y amazon-ssm-agent 2>/dev/null || true; rm -rf /etc/amazon/ssm /var/lib/amazon/ssm; rpm -Uvh "$VERIFY_DIR/amazon-ssm-agent.rpm" || true; else echo "[WARN] SSM Agent package signature NOT verified: keeping the SSM Agent already in the AMI"; fi',
       'systemctl daemon-reload; systemctl enable amazon-ssm-agent; systemctl start amazon-ssm-agent || true',
       'for i in $(seq 1 24); do sleep 5; if systemctl is-active --quiet amazon-ssm-agent && [ -f /var/lib/amazon/ssm/registration ]; then echo "SSM registered after $((i*5))s"; break; fi; systemctl start amazon-ssm-agent 2>/dev/null || true; done',
-      '# --- ZPA connector provisioning ---',
+      // CloudWatch agent: verified, installed and running BEFORE the provisioning key is read.
+      // Fail closed: a connector that can't ship its logs never reads the key or enrolls, and
+      // shuts down so Amazon EC2 Auto Scaling replaces it. The [FATAL] line reaches the EC2
+      // console output (the agent that would ship it isn't running).
+      '# --- CloudWatch agent: download, verify the AWS detached signature, install and start (the RHEL9 Zscaler AMI has no yum entry for it) ---',
+      'CW_FPR=937616F3450B7D806CBD9725D58167303B789C72',
+      'CW_BASE=https://amazoncloudwatch-agent.s3.amazonaws.com',
+      'curl -sfo "$VERIFY_DIR/cw.rpm" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm" || { CW_BASE="https://amazoncloudwatch-agent-$REGION.s3.$REGION.amazonaws.com"; curl -sfo "$VERIFY_DIR/cw.rpm" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm"; } || true',
+      'curl -sfo "$VERIFY_DIR/cw.rpm.sig" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm.sig" || true',
+      'curl -sfo "$VERIFY_DIR/cw.gpg" https://amazoncloudwatch-agent.s3.amazonaws.com/assets/amazon-cloudwatch-agent.gpg || true',
+      'CW_OK=0; if [ "$(key_fpr "$VERIFY_DIR/cw.gpg")" = "$CW_FPR" ] && gpg --batch --import "$VERIFY_DIR/cw.gpg" 2>/dev/null && gpg --batch --status-fd 1 --verify "$VERIFY_DIR/cw.rpm.sig" "$VERIFY_DIR/cw.rpm" 2>/dev/null | grep -qF "[GNUPG:] VALIDSIG $CW_FPR "; then echo "[OK] CloudWatch agent package signature verified (key 3B789C72)"; rpm -Uvh --nodeps --replacepkgs "$VERIFY_DIR/cw.rpm" && CW_OK=1; fi',
+      `if [ "$CW_OK" = 1 ] && /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c ssm:${CW_AGENT_PARAM}; then echo "[OK] CloudWatch agent installed and running"; else echo "[FATAL] CloudWatch agent not verified, installed or started. Not reading the provisioning key. Shutting down."; shutdown -h now; exit 1; fi`,
       'mkdir -p /opt/zscaler/etc /opt/zscaler/var',
       // nosemgrep: missing-template-string-indicator -- literal JSON in a single-quoted shell string, not a JS template literal
       `echo '{"connector":{"mode":"connector"}}' > /opt/zscaler/etc/config.json`,
@@ -354,14 +385,6 @@ export class ZpaConnectorStack extends cdk.Stack {
       'rm -f /opt/zscaler/var/.zrhi /opt/zscaler/var/oauth_enrollment_stats.json',
       'systemctl unmask --runtime zpa-connector 2>/dev/null || true',
       'systemctl restart zpa-connector || systemctl start zpa-connector || true',
-      '# --- CloudWatch agent: download, verify the AWS detached signature, then install (the RHEL9 Zscaler AMI has no yum entry for it) ---',
-      'CW_FPR=937616F3450B7D806CBD9725D58167303B789C72',
-      'CW_BASE=https://amazoncloudwatch-agent.s3.amazonaws.com',
-      'curl -sfo "$VERIFY_DIR/cw.rpm" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm" || { CW_BASE="https://amazoncloudwatch-agent-$REGION.s3.$REGION.amazonaws.com"; curl -sfo "$VERIFY_DIR/cw.rpm" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm"; } || true',
-      'curl -sfo "$VERIFY_DIR/cw.rpm.sig" "$CW_BASE/redhat/amd64/latest/amazon-cloudwatch-agent.rpm.sig" || true',
-      'curl -sfo "$VERIFY_DIR/cw.gpg" https://amazoncloudwatch-agent.s3.amazonaws.com/assets/amazon-cloudwatch-agent.gpg || true',
-      'if [ "$(key_fpr "$VERIFY_DIR/cw.gpg")" = "$CW_FPR" ] && gpg --batch --import "$VERIFY_DIR/cw.gpg" 2>/dev/null && gpg --batch --status-fd 1 --verify "$VERIFY_DIR/cw.rpm.sig" "$VERIFY_DIR/cw.rpm" 2>/dev/null | grep -qF "[GNUPG:] VALIDSIG $CW_FPR "; then echo "[OK] CloudWatch agent package signature verified (key 3B789C72)"; rpm -Uvh --nodeps --replacepkgs "$VERIFY_DIR/cw.rpm" || true; else echo "[WARN] CloudWatch agent package signature NOT verified: not installing it"; fi',
-      `/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c ssm:${CW_AGENT_PARAM} || true`,
       'rm -rf "$VERIFY_DIR"',
       'touch /var/log/user-data-completed',
       'echo "[END] $(date)"',
@@ -814,7 +837,7 @@ export class ZpaConnectorStack extends cdk.Stack {
       value:
         `POST-DEPLOY (manual): add backend app egress to SG ${sg.securityGroupId}. ` +
         `The connector INITIATES sessions to backends, so it needs egress to the app ports/CIDRs it serves ` +
-        `(over and above 443/80 to the Zscaler cloud). If the VPC DHCP options use your own DNS servers instead of AmazonProvidedDNS, ` +
+        `(over and above TCP 443 to the Zscaler cloud). If the VPC DHCP options use your own DNS servers instead of AmazonProvidedDNS, ` +
         `also add UDP and TCP 53 egress to those servers so the connector can resolve the SAP host names. ` +
         `Allow only the ports your ZPA application segments use, to the backend CIDR, for example the SAP ports: ` +
         `aws ec2 authorize-security-group-egress --group-id ${sg.securityGroupId} --region ${cfg.region} --ip-permissions ` +

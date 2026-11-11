@@ -9,7 +9,15 @@ cdk.out/
 # CDK context cache (may contain account-specific lookup values)
 cdk.context.json
 
-# Logs / OS
+secrets.json
+.env
+*.pem
+*.key
+
+# Temp / backup / OS
 *.log
+*.tmp
+*.bkp
+.$*.bkp
 .DS_Store
 Thumbs.db

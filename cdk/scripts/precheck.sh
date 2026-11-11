@@ -132,7 +132,7 @@ if [[ -n "$VPC" ]]; then
   NATS=$("${AWS[@]}" ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$VPC" \
     --query 'NatGateways[?State==`available`].NatGatewayId' --output text 2>/dev/null)
   if [[ -n "$NATS" ]]; then ok "Available NAT gateway(s): $NATS"
-  elif [[ "$EGRESS_TGW" == "1" ]]; then info "No NAT gateway in $VPC; the subnets use a centralized egress VPC. Confirm it allows outbound TCP 80 and 443."
+  elif [[ "$EGRESS_TGW" == "1" ]]; then info "No NAT gateway in $VPC; the subnets use a centralized egress VPC. Confirm it allows outbound TCP 443."
   else bad "No available NAT gateway in $VPC"; fi
 else
   info "Skipped (no --vpc)."
