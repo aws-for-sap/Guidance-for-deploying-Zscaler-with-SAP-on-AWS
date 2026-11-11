@@ -312,6 +312,13 @@ export class ZpaConnectorStack extends cdk.Stack {
     // ("Verify the signature of SSM Agent"). It expires on 2027-11-25; replace it when AWS
     // publishes the next key. The fingerprint below is pinned and checked at boot.
     const ssmAgentSigningKey = fs.readFileSync(path.join(__dirname, '..', 'assets', 'amazon-ssm-agent.gpg'), 'utf8').replace(/\r\n/g, '\n').trim();
+    // The shell script below runs late in boot (cloud-final), after the AMI's zpa-connector
+    // service has already started and, with no key, created an OAuth user code in /etc/issue,
+    // which the serial console then prints. So the user data is multipart: a cloud-config
+    // bootcmd runs first, in cloud-init's network stage, which is ordered before
+    // network-online.target, and so before zpa-connector (After=network-online.target). It masks
+    // the service for this boot only, and only on the instance's first boot (cloud-init-per once).
+    // The shell script unmasks it after the provisioning key is written.
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
       'set -uo pipefail',
@@ -383,6 +390,8 @@ export class ZpaConnectorStack extends cdk.Stack {
       'aws secretsmanager get-secret-value --secret-id "$SECRET_NAME" --region "$REGION" --query SecretString --output text > /opt/zscaler/var/provision_key',
       '# Clear any OAuth enrollment state again (a package update could have started the service before the mask), then start the connector once on a clean state',
       'rm -f /opt/zscaler/var/.zrhi /opt/zscaler/var/oauth_enrollment_stats.json',
+      '# Remove any OAuth user code the AMI wrote to /etc/issue (printed on the serial console); the connector enrolls with the key',
+      'sed -i -e "/OAuth Token/d" -e "/enter the code/d" /etc/issue 2>/dev/null || true',
       'systemctl unmask --runtime zpa-connector 2>/dev/null || true',
       'systemctl restart zpa-connector || systemctl start zpa-connector || true',
       'rm -rf "$VERIFY_DIR"',
@@ -440,6 +449,17 @@ export class ZpaConnectorStack extends cdk.Stack {
       alarmTopic.addSubscription(new subs.EmailSubscription(cfg.alarmEmail));
     }
 
+    const bootUserData = new ec2.MultipartUserData();
+    bootUserData.addPart(ec2.MultipartBody.fromRawBody({
+      contentType: 'text/cloud-config; charset="utf-8"',
+      body: [
+        '#cloud-config',
+        'bootcmd:',
+        '  - [cloud-init-per, once, zpa-mask-connector, systemctl, mask, --runtime, --now, zpa-connector]',
+      ].join('\n'),
+    }));
+    bootUserData.addUserDataPart(userData, ec2.MultipartBody.SHELL_SCRIPT, true);
+
     const lt = new ec2.LaunchTemplate(this, 'ConnectorLaunchTemplate', {
       machineImage: ami,
       instanceType: new ec2.InstanceType(cfg.instanceType),
@@ -449,7 +469,7 @@ export class ZpaConnectorStack extends cdk.Stack {
       // Connectors never get a public IP address, even if a subnet in privateSubnetIds
       // auto-assigns one. They reach the internet only through NAT or central egress.
       associatePublicIpAddress: false,
-      userData,
+      userData: bootUserData,
       blockDevices: [{
         deviceName: '/dev/xvda',
         volume: ec2.BlockDeviceVolume.ebs(cfg.volumeSizeGiB, {
