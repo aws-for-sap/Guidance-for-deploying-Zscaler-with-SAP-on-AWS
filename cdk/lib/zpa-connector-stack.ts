@@ -359,6 +359,7 @@ export class ZpaConnectorStack extends cdk.Stack {
       // (from the AWS documentation) before it is installed. Verification uses a throwaway
       // keyring and rpm database, so nothing is added to the system trust store.
       'VERIFY_DIR=$(mktemp -d /tmp/zpa-verify.XXXXXX); export GNUPGHOME="$VERIFY_DIR/gnupg"; mkdir -m 700 "$GNUPGHOME"',
+      // nosemgrep: missing-template-string-indicator -- {print $10; exit} is an awk program inside a shell command, not a JS placeholder
       `key_fpr() { gpg --batch --with-colons --import-options show-only --import "$1" 2>/dev/null | awk -F: '/^fpr/{print $10; exit}'; }`,
       `cat > "$VERIFY_DIR/amazon-ssm-agent.gpg" <<'ZPA_SSM_SIGNING_KEY'\n${ssmAgentSigningKey}\nZPA_SSM_SIGNING_KEY`,
       '# --- SSM agent: download, verify the embedded AWS signature, then clean reinstall + wait for registration ---',
@@ -861,9 +862,13 @@ export class ZpaConnectorStack extends cdk.Stack {
         `also add UDP and TCP 53 egress to those servers so the connector can resolve the SAP host names. ` +
         `Allow only the ports your ZPA application segments use, to the backend CIDR, for example the SAP ports: ` +
         `aws ec2 authorize-security-group-egress --group-id ${sg.securityGroupId} --region ${cfg.region} --ip-permissions ` +
+        // nosemgrep: missing-template-string-indicator -- [{CidrIp=...}] is AWS CLI shorthand syntax in the example command, not a JS placeholder
         `"IpProtocol=tcp,FromPort=3200,ToPort=3299,IpRanges=[{CidrIp=<SAP_CIDR>,Description=SAP dispatcher}]" ` +
+        // nosemgrep: missing-template-string-indicator -- [{CidrIp=...}] is AWS CLI shorthand syntax in the example command, not a JS placeholder
         `"IpProtocol=tcp,FromPort=3300,ToPort=3399,IpRanges=[{CidrIp=<SAP_CIDR>,Description=SAP gateway}]" ` +
+        // nosemgrep: missing-template-string-indicator -- [{CidrIp=...}] is AWS CLI shorthand syntax in the example command, not a JS placeholder
         `"IpProtocol=tcp,FromPort=3600,ToPort=3699,IpRanges=[{CidrIp=<SAP_CIDR>,Description=SAP message server}]" ` +
+        // nosemgrep: missing-template-string-indicator -- [{CidrIp=...}] is AWS CLI shorthand syntax in the example command, not a JS placeholder
         `"IpProtocol=tcp,FromPort=44300,ToPort=44300,IpRanges=[{CidrIp=<SAP_CIDR>,Description=SAP HTTPS}]". Never 0.0.0.0/0.`,
     });
     new cdk.CfnOutput(this, 'ActionRequired', {
