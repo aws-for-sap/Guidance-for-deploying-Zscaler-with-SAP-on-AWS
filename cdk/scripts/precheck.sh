@@ -153,7 +153,7 @@ if ARN=$("${AWS[@]}" secretsmanager describe-secret --secret-id "$SECRET" --quer
 else
   info "Secret does not exist yet — the CDK stack will CREATE it empty; populate it after deploy:"
   info "  Save the key to provisioning-key.txt with an editor (not on the command line), then:"
-  info "  aws --profile $PROFILE --region $REGION secretsmanager put-secret-value --secret-id $SECRET --secret-string file://provisioning-key.txt && shred -u provisioning-key.txt"
+  info "  aws --profile $PROFILE --region $REGION secretsmanager put-secret-value --secret-id $SECRET --secret-string file://provisioning-key.txt && rm -f provisioning-key.txt"
 fi
 echo
 

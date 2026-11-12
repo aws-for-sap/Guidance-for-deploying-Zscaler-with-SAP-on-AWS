@@ -389,6 +389,12 @@ export class ZpaConnectorStack extends cdk.Stack {
       '# Provisioning key from Secrets Manager (create file first, then populate - perms 644 as the AMI expects)',
       'touch /opt/zscaler/var/provision_key && chmod 644 /opt/zscaler/var/provision_key',
       'aws secretsmanager get-secret-value --secret-id "$SECRET_NAME" --region "$REGION" --query SecretString --output text > /opt/zscaler/var/provision_key',
+      // Fail closed on a missing or placeholder key: a connector started without a valid key falls back
+      // to OAuth enrollment and writes a one-time user code to /etc/issue. The mask is --runtime, so the
+      // instance shuts down instead of staying up masked (a patch reboot would clear the mask).
+      // The CloudWatch agent is already running here, so wait 15 seconds for it to ship the [FATAL] line.
+      'if [ ! -s /opt/zscaler/var/provision_key ] || grep -qxF "REPLACE_WITH_ZPA_PROVISIONING_KEY" /opt/zscaler/var/provision_key; then echo "[FATAL] Provisioning key missing or still the placeholder. Not starting the connector. Shutting down in 15 seconds."; sleep 15; shutdown -h now; exit 1; fi',
+      'echo "[OK] Provisioning key present"',
       '# Clear any OAuth enrollment state again (a package update could have started the service before the mask), then start the connector once on a clean state',
       'rm -f /opt/zscaler/var/.zrhi /opt/zscaler/var/oauth_enrollment_stats.json',
       '# Remove any OAuth user code the AMI wrote to /etc/issue (printed on the serial console); the connector enrolls with the key',
