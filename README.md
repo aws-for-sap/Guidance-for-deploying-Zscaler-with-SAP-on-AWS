@@ -1,7 +1,7 @@
 <!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
 <!-- SPDX-License-Identifier: MIT-0 -->
 
-# Zscaler ZPA App Connector on AWS
+# Guidance for deploying Zscaler with SAP on AWS
 
 > **Important:** This sample code is a non-production reference architecture. It's provided for demonstration and evaluation, and it isn't intended for production use as is. Before you use it with production workloads, review the AWS Identity and Access Management (IAM) policies, encryption settings, network controls, instance sizing, and patch schedules. Adapt them to your organization's security, compliance, and operational requirements, and have your own security team review the result.
 
