@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 # shellcheck disable=SC2016  # the backticks are JMESPath literals inside --query strings, not shell expansions
 # ============================================================================
 # ZPA Connector CDK — pre-deployment prerequisite check (Linux / macOS / Cloud Shell)
