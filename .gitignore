@@ -1,0 +1,23 @@
+# CDK / Node
+node_modules/
+cdk.out/
+*.js
+*.d.ts
+!jest.config.js
+*.tsbuildinfo
+
+# CDK context cache (may contain account-specific lookup values)
+cdk.context.json
+
+secrets.json
+.env
+*.pem
+*.key
+
+# Temp / backup / OS
+*.log
+*.tmp
+*.bkp
+.$*.bkp
+.DS_Store
+Thumbs.db
